@@ -1,10 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import {
-  IBazaarParser,
-  ParsedBazaarItem,
-  ParsedBazaarResult,
-} from './parser.interface';
+import { IBazaarParser, ParsedBazaarItem, ParsedBazaarResult } from './parser.interface';
 import { FuzzyNormalizer } from './fuzzy-normalizer';
 
 @Injectable()
@@ -13,18 +9,112 @@ export class Tier2AiParserService implements IBazaarParser {
 
   constructor(private configService: ConfigService) {}
 
-  async parse(
+  /**
+   * Helper: Call Google Gemini API
+   */
+  private async callGemini(
+    apiKey: string,
+    model: string,
+    systemPromptWithContext: string,
     rawText: string,
-    managerName?: string,
-  ): Promise<ParsedBazaarResult> {
-    const apiKey =
-      this.configService.get<string>('GEMINI_API_KEY') ||
-      process.env.GEMINI_API_KEY;
+  ): Promise<string> {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: `${systemPromptWithContext}\n\nUser Notes:\n${rawText}` }],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+        },
+      }),
+    });
 
-    if (!apiKey) {
-      this.logger.warn(
-        'GEMINI_API_KEY is not configured in .env. Skipping AI parse.',
-      );
+    if (!response.ok) {
+      const errBody = await response.text();
+      throw new Error(`Gemini HTTP ${response.status}: ${errBody}`);
+    }
+
+    const data = await response.json();
+    const contentText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!contentText) throw new Error('Empty response from Gemini');
+    return contentText;
+  }
+
+  /**
+   * Helper: Call OpenAI-compatible LLM endpoints (Groq Cloud & OpenRouter)
+   */
+  private async callOpenAiCompatible(
+    apiUrl: string,
+    apiKey: string,
+    model: string,
+    systemPromptWithContext: string,
+    rawText: string,
+    providerName: string,
+    extraHeaders: Record<string, string> = {},
+  ): Promise<string> {
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        ...extraHeaders,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: systemPromptWithContext },
+          { role: 'user', content: `User Notes:\n${rawText}` },
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.1,
+      }),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      throw new Error(`${providerName} HTTP ${response.status}: ${errBody}`);
+    }
+
+    const data = await response.json();
+    const contentText = data?.choices?.[0]?.message?.content;
+    if (!contentText) throw new Error(`Empty response from ${providerName}`);
+    return contentText;
+  }
+
+  async parse(rawText: string, managerName?: string): Promise<ParsedBazaarResult> {
+    const geminiKey =
+      this.configService.get<string>('GEMINI_API_KEY') || process.env.GEMINI_API_KEY;
+    const geminiModel =
+      this.configService.get<string>('GEMINI_MODEL') ||
+      process.env.GEMINI_MODEL ||
+      'gemini-3.6-flash';
+
+    const groqKey =
+      this.configService.get<string>('GROQ_API_KEY') || process.env.GROQ_API_KEY;
+    const groqModel =
+      this.configService.get<string>('GROQ_MODEL') ||
+      process.env.GROQ_MODEL ||
+      'llama-3.3-70b-versatile';
+
+    const openRouterKey =
+      this.configService.get<string>('OPENROUTER_API_KEY') ||
+      process.env.OPENROUTER_API_KEY;
+    const openRouterModel =
+      this.configService.get<string>('OPENROUTER_MODEL') ||
+      process.env.OPENROUTER_MODEL ||
+      'meta-llama/llama-3.3-70b-instruct:free';
+
+    const hasAnyKey = !!(geminiKey || groqKey || openRouterKey);
+
+    if (!hasAnyKey) {
+      this.logger.warn('No AI API Keys configured (GEMINI, GROQ, or OPENROUTER). Skipping AI parse.');
       return {
         depositAmount: 0,
         items: [],
@@ -32,7 +122,7 @@ export class Tier2AiParserService implements IBazaarParser {
         rawText,
         engineUsed: 'TIER2_AI',
         confidence: 0,
-        warnings: ['GEMINI_API_KEY is not configured in .env'],
+        warnings: ['No AI API Keys configured in .env'],
       };
     }
 
@@ -69,117 +159,60 @@ Your job is to parse complex, conversational Bengali/Banglish bazaar notepad tex
    - Calculate Total Bazaar Cost = Sum of all bazaar items.
    - Calculate Remaining Change = Total Cash Collected - Total Bazaar Cost.
    - SHOPPER KEPT UNRETURNED CASH (বাজারকারী যদি অবশিষ্ট ক্যাশ ফেরত না দিয়ে নিজের কাছে রাখে):
-     If change is returned to manager/mess (e.g. "rohim ke ferot disi 900", "managar ke 300 ferot"):
+     If change is returned to manager/mess (e.g. "rohim ke ferot disi 900", "manager ke disi 500"):
        Unreturned Cash Kept by Shopper = Remaining Change - Cash Returned to Manager.
      If Shopper kept unreturned cash and did NOT contribute personal money:
        The shopper took a cash advance from mess funds!
        Record a NEGATIVE deposit for the shopper in "memberDeposits":
        { "memberName": "Ami (Shopper)", "amount": -(Unreturned Cash Kept by Shopper) }
-       Example: Total cash 2500, Bazaar 1500, Remaining 1000. Shopper returned 900 to manager Rohim.
-       Shopper kept: 1000 - 900 = 100 Tk.
-       Shopper's net deposit = -100 Tk. (This ensures shopper's meal balance is debited by 100 Tk!).
    - Net "depositAmount" = Sum of all items in "memberDeposits".
-     (In the above example: 500 + 500 + 1500 - 100 = 2400 Tk.
-      Notice: Bazaar Cost 1500 + Cash in Manager Hand 900 = 2400 Tk! Perfectly balanced!).
 
 2. 💰 CASH & NET DEPOSIT RECONCILIATION WHEN SHOPPER CONTRIBUTED PERSONAL CASH:
    - When shopper contributes personal cash ("ami disi 500") and withdraws money ("ami nisi 200") or keeps change:
      Shopper Net Deposit = (Shopper's personal cash contributed) - (Shopper's personal withdrawals/change kept).
-   - Case Study: "mangaer amake dise 2000 taka, ami disi 500, polar chaul 5kg 1k, murgi 5kg 800, ami nisi 200, managar ke ferot dese 300/="
-     - Manager gave: 2000. Shopper added: 500. Total in hand: 2500.
-     - Items: 1000 + 800 = 1800.
-     - Remaining cash: 2500 - 1800 = 700.
-     - Shopper took back: 200. Shopper returned to manager: 300. Shopper kept remaining change: 200.
-     - Total shopper kept/withdrew: 200 + 200 = 400.
-     - Shopper's net contribution to mess: 500 - 400 = 100 Taka!
-     - Output: depositAmount = 100.
 
 3. 🚫 PERSONAL (NON-MESS) EXPENSE FILTER:
    - If user notes personal expenses (e.g. "amar nijer sabun 80", "personal khata 50", "eta mess er na"):
-     DO NOT include them in mess "items" or "totalCost"! Note them in "warnings" (e.g. "Excluded personal item: sabun 80 Tk").
+     DO NOT include them in mess "items" or "totalCost"! Note them in "warnings".
 
 4. 📏 CULTURAL UNITS & CONVERSIONS:
-   - "poa" / "পোয়া" / "পোয়া" = 0.25 kg (or 250 gm)
-   - "hali" / "হালি" = 4 pieces (e.g. "der hali" = 1.5 * 4 = 6 pieces)
-   - "dozen" / "ডজন" = 12 pieces (e.g. "adha dozen" = 0.5 * 12 = 6 pieces)
-   - "kuri" / "কুড়ি" / "কুড়ি" = 20 pieces
-   - "der kg" (দেড় কেজি) = 1.5 kg, "arai kg" (আড়াই কেজি) = 2.5 kg, "adha liter" = 0.5 ltr
-   - Currency: "1k" = 1000, "1.5k" = 1500, "500/=" or "500/-" = 500, "১, ২, ৩, ০" = 1, 2, 3, 0.
+   - "poa" / "পোয়া" = 0.25 kg (or 250 gm), "hali" / "হালি" = 4 pieces, "dozen" / "ডজন" = 12 pieces, "kuri" = 20 pieces
+   - "der kg" = 1.5 kg, "arai kg" = 2.5 kg, "adha liter" = 0.5 ltr
+   - Currency: "1k" = 1000, "1.5k" = 1500, "500/=" or "500/-" = 500.
 
 5. 💳 DUE / BAKI TO SHOPKEEPER:
-   - If user mentions due to shopkeeper (e.g. "bajar 2200, 200 baki ase dokandarer"):
-     Record full item cost (2200), and add warning: "Due to shopkeeper: 200 Tk".
+   - Record full item cost, and add warning: "Due to shopkeeper: X Tk".
 
 6. 🔤 PHONETIC BANGLISH & TYPOS:
-   - "mangaer" / "managar" = Manager
-   - "polar chaul" = Polao Chaul (পোলাওর চাল)
-   - "dese" / "dise" / "dis" = gave
-   - "nisi" / "nilam" = took / kept
+   - "mangaer" / "managar" = Manager, "polar chaul" = Polao Chaul, "dese" / "dise" = gave, "nisi" / "nilam" = took.
 
 ### FEW-SHOT BENCHMARK EXAMPLES:
 
 User Input:
-"korim dise 500
-rohim dse 500
-jisun dis 1.5k
-chal 5kg 300
-murgi 5k 1k
-mas 5kg 200
-rohim ke ferot disi 900"
+"jisan dise 1.5k
+karim dise 300
+alif dise 100
+murgi 5kg 1k
+potol 1kg 100
+chaul 1kg 100
+gari vara 20
+manager ke disi 500"
 Output:
 {
-  "depositAmount": 2400,
+  "depositAmount": 220,
   "items": [
-    { "name": "Chaul (চাল)", "originalName": "chal", "quantity": 5, "unit": "kg", "cost": 300 },
     { "name": "Murgi (মুরগি)", "originalName": "murgi", "quantity": 5, "unit": "kg", "cost": 1000 },
-    { "name": "Mach (মাছ)", "originalName": "mas", "quantity": 5, "unit": "kg", "cost": 200 }
+    { "name": "Potol (পটল)", "originalName": "potol", "quantity": 1, "unit": "kg", "cost": 100 },
+    { "name": "Chaul (চাল)", "originalName": "chaul", "quantity": 1, "unit": "kg", "cost": 100 },
+    { "name": "Gari Vara (গাড়ি ভাড়া)", "originalName": "gari vara", "quantity": 1, "unit": "trip", "cost": 20 }
   ],
   "memberDeposits": [
-    { "memberName": "Korim", "amount": 500 },
-    { "memberName": "Rohim", "amount": 500 },
-    { "memberName": "Jisan", "amount": 1500 },
-    { "memberName": "Ami (Shopper)", "amount": -100 }
+    { "memberName": "Karim", "amount": 300 },
+    { "memberName": "Alif", "amount": 100 },
+    { "memberName": "Ami (Shopper)", "amount": -180 }
   ],
   "warnings": [
-    "Reconciliation: Total collected 2500 Tk. Bazaar cost 1500 Tk. Rohim received 900 Tk cash return. Shopper kept 100 Tk unreturned cash (recorded as -100 Tk deposit for shopper). Total net deposit: 2400 Tk."
-  ]
-}
-
-User Input:
-"mangaer amake dise 2000 taka
-ami disi 500
-polar chaul 5kg 1k
-murgi 5kg 800
-ami nisi 200
-managar ke ferot dese 300/="
-Output:
-{
-  "depositAmount": 100,
-  "items": [
-    { "name": "Polao Chaul (পোলাওর চাল)", "originalName": "polar chaul", "quantity": 5, "unit": "kg", "cost": 1000 },
-    { "name": "Murgi (মুরগি)", "originalName": "murgi", "quantity": 5, "unit": "kg", "cost": 800 }
-  ],
-  "warnings": [
-    "Reconciled: Shopper added 500 Tk, withdrew 400 Tk (200 during bazaar + 200 change), net deposit is 100 Tk. Manager received 300 Tk cash return."
-  ]
-}
-
-User Input:
-"alu 3kg 90
-dim der hali 75
-amar personal paste 65 tk eta mess er na
-ada 1 poa 50
-deposit 500 ferot nisi 220"
-Output:
-{
-  "depositAmount": 280,
-  "items": [
-    { "name": "Alu (আলু)", "originalName": "alu", "quantity": 3, "unit": "kg", "cost": 90 },
-    { "name": "Dim (ডিম)", "originalName": "dim", "quantity": 6, "unit": "piece", "cost": 75 },
-    { "name": "Ada (আদা)", "originalName": "ada", "quantity": 0.25, "unit": "kg", "cost": 50 }
-  ],
-  "warnings": [
-    "Excluded personal item: personal paste (65 Tk) is not counted in mess bazaar."
+    "Reconciliation: Total collected 1900 Tk (Jisan/Manager 1500 Tk + Karim 300 Tk + Alif 100 Tk). Bazaar cost 1220 Tk. Manager received 500 Tk cash return. Shopper kept 180 Tk unreturned cash (recorded as -180 Tk deposit for shopper). Total net deposit: 220 Tk."
   ]
 }`;
 
@@ -191,79 +224,127 @@ Output:
 - When change is returned to "${managerName}" (e.g. "${managerName} ke ferot disi 500", "manager ke disi 500"), it is unspent mess cash returned to the manager fund.\n`
       : '';
 
-    try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${this.configService.get<string>('GEMINI_MODEL') || process.env.GEMINI_MODEL || 'gemini-3.6-flash'}:generateContent?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [
-              {
-                role: 'user',
-                parts: [
-                  {
-                    text: `${systemPrompt}${managerDirective}\n\nUser Notes:\n${rawText}`,
-                  },
-                ],
-              },
-            ],
-            generationConfig: {
-              responseMimeType: 'application/json',
-              temperature: 0.1,
-            },
-          }),
-        },
-      );
+    const fullPrompt = `${systemPrompt}${managerDirective}`;
 
-      if (!response.ok) {
-        throw new Error(`Gemini API responded with status ${response.status}`);
+    let rawJsonText: string | null = null;
+    let activeAiProvider = 'NONE';
+    const fallbackWarnings: string[] = [];
+
+    // -------------------------------------------------------------
+    // Tier 2A: Primary AI - Google Gemini
+    // -------------------------------------------------------------
+    if (geminiKey) {
+      try {
+        rawJsonText = await this.callGemini(geminiKey, geminiModel, fullPrompt, rawText);
+        activeAiProvider = `Gemini (${geminiModel})`;
+        this.logger.log(`[Tier2Ai] Successfully parsed via Primary AI: ${activeAiProvider}`);
+      } catch (err: any) {
+        this.logger.warn(`[Tier2Ai] Primary AI (Gemini) failed: ${err.message}. Falling back to Secondary AI (Groq)...`);
+        fallbackWarnings.push(`Primary AI (Gemini) unavailable: ${err.message}`);
       }
+    }
 
-      const data = await response.json();
-      const contentText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!contentText) throw new Error('Empty response from Gemini');
+    // -------------------------------------------------------------
+    // Tier 2B: Secondary AI - Groq Cloud (Ultra-Fast LPU)
+    // -------------------------------------------------------------
+    if (!rawJsonText && groqKey) {
+      try {
+        rawJsonText = await this.callOpenAiCompatible(
+          'https://api.groq.com/openai/v1/chat/completions',
+          groqKey,
+          groqModel,
+          fullPrompt,
+          rawText,
+          'Groq Cloud',
+        );
+        activeAiProvider = `Groq (${groqModel})`;
+        this.logger.log(`[Tier2Ai] Successfully parsed via Secondary AI: ${activeAiProvider}`);
+        fallbackWarnings.push(`Parsed via Secondary Failover: ${activeAiProvider}`);
+      } catch (err: any) {
+        this.logger.warn(`[Tier2Ai] Secondary AI (Groq) failed: ${err.message}. Falling back to Tertiary AI (OpenRouter)...`);
+        fallbackWarnings.push(`Secondary AI (Groq) unavailable: ${err.message}`);
+      }
+    }
 
-      const parsedJson = JSON.parse(contentText);
+    // -------------------------------------------------------------
+    // Tier 2C: Tertiary AI - OpenRouter (Universal Free Aggregator)
+    // -------------------------------------------------------------
+    if (!rawJsonText && openRouterKey) {
+      try {
+        rawJsonText = await this.callOpenAiCompatible(
+          'https://openrouter.ai/api/v1/chat/completions',
+          openRouterKey,
+          openRouterModel,
+          fullPrompt,
+          rawText,
+          'OpenRouter',
+          {
+            'HTTP-Referer': 'https://mealbook.app',
+            'X-Title': 'Meal Book AI',
+          },
+        );
+        activeAiProvider = `OpenRouter (${openRouterModel})`;
+        this.logger.log(`[Tier2Ai] Successfully parsed via Tertiary AI: ${activeAiProvider}`);
+        fallbackWarnings.push(`Parsed via Tertiary Failover: ${activeAiProvider}`);
+      } catch (err: any) {
+        this.logger.error(`[Tier2Ai] Tertiary AI (OpenRouter) failed: ${err.message}`);
+        fallbackWarnings.push(`Tertiary AI (OpenRouter) unavailable: ${err.message}`);
+      }
+    }
 
-      const items: ParsedBazaarItem[] = (parsedJson.items || []).map(
-        (item: any) => {
-          const normalized = FuzzyNormalizer.normalize(
-            item.originalName || item.name || 'Unknown',
-          );
-          const finalName =
-            item.name && item.name.includes('(')
-              ? item.name
-              : normalized.confidence >= 0.9
-                ? normalized.canonicalName
-                : item.name || normalized.canonicalName;
+    // -------------------------------------------------------------
+    // If all configured AI providers failed or none responded
+    // -------------------------------------------------------------
+    if (!rawJsonText) {
+      this.logger.error('[Tier2Ai] All AI providers (Gemini, Groq, OpenRouter) failed or unconfigured.');
+      return {
+        depositAmount: 0,
+        items: [],
+        totalCost: 0,
+        rawText,
+        engineUsed: 'TIER2_AI',
+        confidence: 0,
+        warnings: [
+          'All AI engines (Gemini, Groq, OpenRouter) are currently unavailable.',
+          ...fallbackWarnings,
+        ],
+      };
+    }
 
-          return {
-            name: finalName,
-            originalName: item.originalName || item.name || 'Unknown',
-            quantity:
-              typeof item.quantity === 'number' && item.quantity > 0
-                ? item.quantity
-                : 1,
-            unit: item.unit || normalized.defaultUnit,
-            cost: typeof item.cost === 'number' ? item.cost : 0,
-            confidence: 0.95,
-          };
-        },
-      );
+    try {
+      // Clean possible markdown code fences from response (e.g. ```json ... ```)
+      const cleanJson = rawJsonText
+        .replace(/^\s*\`\`\`(?:json)?\s*/i, '')
+        .replace(/\s*\`\`\`\s*$/i, '')
+        .trim();
+
+      const parsedJson = JSON.parse(cleanJson);
+
+      const items: ParsedBazaarItem[] = (parsedJson.items || []).map((item: any) => {
+        const normalized = FuzzyNormalizer.normalize(item.originalName || item.name || 'Unknown');
+        const finalName =
+          item.name && item.name.includes('(')
+            ? item.name
+            : normalized.confidence >= 0.9
+              ? normalized.canonicalName
+              : item.name || normalized.canonicalName;
+
+        return {
+          name: finalName,
+          originalName: item.originalName || item.name || 'Unknown',
+          quantity: typeof item.quantity === 'number' && item.quantity > 0 ? item.quantity : 1,
+          unit: item.unit || normalized.defaultUnit,
+          cost: typeof item.cost === 'number' ? item.cost : 0,
+          confidence: 0.95,
+        };
+      });
 
       const totalCost = items.reduce((sum, item) => sum + item.cost, 0);
 
-      // Multi-member deposit parsing (supports both positive and negative deposits/withdrawals)
+      // Multi-member deposit parsing (supports positive contributions and negative cash deductions)
       const memberDeposits = Array.isArray(parsedJson.memberDeposits)
         ? parsedJson.memberDeposits
-            .filter(
-              (m: any) =>
-                m &&
-                m.memberName &&
-                typeof m.amount === 'number' &&
-                m.amount !== 0,
-            )
+            .filter((m: any) => m && m.memberName && typeof m.amount === 'number' && m.amount !== 0)
             .map((m: any) => ({
               memberName: String(m.memberName).trim(),
               amount: Number(m.amount),
@@ -272,15 +353,16 @@ Output:
 
       // Calculate total net deposit amount
       const totalDeposit =
-        typeof parsedJson.depositAmount === 'number' &&
-        parsedJson.depositAmount !== 0
+        typeof parsedJson.depositAmount === 'number' && parsedJson.depositAmount !== 0
           ? parsedJson.depositAmount
           : memberDeposits && memberDeposits.length > 0
-            ? memberDeposits.reduce(
-                (sum: number, m: { amount: number }) => sum + m.amount,
-                0,
-              )
+            ? memberDeposits.reduce((sum: number, m: { amount: number }) => sum + m.amount, 0)
             : 0;
+
+      const mergedWarnings = [
+        ...(parsedJson.warnings || []),
+        ...fallbackWarnings,
+      ];
 
       return {
         depositAmount: totalDeposit,
@@ -289,14 +371,11 @@ Output:
         rawText,
         engineUsed: 'TIER2_AI',
         confidence: 0.95,
-        warnings: parsedJson.warnings || [],
-        memberDeposits:
-          memberDeposits && memberDeposits.length > 0
-            ? memberDeposits
-            : undefined,
+        warnings: mergedWarnings,
+        memberDeposits: memberDeposits && memberDeposits.length > 0 ? memberDeposits : undefined,
       };
     } catch (err: any) {
-      this.logger.error(`Tier 2 AI Parser Error: ${err.message}`);
+      this.logger.error(`[Tier2Ai] JSON parsing error from ${activeAiProvider}: ${err.message}`);
       return {
         depositAmount: 0,
         items: [],
@@ -304,7 +383,10 @@ Output:
         rawText,
         engineUsed: 'TIER2_AI',
         confidence: 0,
-        warnings: [`AI Parsing failed: ${err.message}`],
+        warnings: [
+          `Failed to parse JSON response from ${activeAiProvider}: ${err.message}`,
+          ...fallbackWarnings,
+        ],
       };
     }
   }
