@@ -84,10 +84,17 @@ export class Tier1RegexParser implements IBazaarParser {
   /**
    * মূল পার্সিং ফাংশন (ডায়নামিক আইটেম সাপোর্ট সহ)
    */
-  async parse(
+  parse(
     rawText: string,
     dynamicItems: ItemDefinition[] = [],
   ): Promise<ParsedBazaarResult> {
+    return Promise.resolve(this.parseSync(rawText, dynamicItems));
+  }
+
+  private parseSync(
+    rawText: string,
+    dynamicItems: ItemDefinition[] = [],
+  ): ParsedBazaarResult {
     const lines = rawText
       .split(/\r?\n/)
       .map((l) => l.trim())

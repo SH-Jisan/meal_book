@@ -26,14 +26,17 @@ export class HttpExceptionFilter implements ExceptionFilter {
         ? exception.getResponse()
         : (exception as Error)?.message || 'Internal server error';
 
-    if (status === HttpStatus.INTERNAL_SERVER_ERROR) {
+    if (status === 500) {
       this.logger.error(`500 Internal Server Error:`, exception);
     }
 
     response.status(status).json({
       success: false,
       statusCode: status,
-      message: typeof message === 'object' ? (message as any).message : message,
+      message:
+        typeof message === 'object' && message !== null && 'message' in message
+          ? message.message
+          : message,
       timestamp: new Date().toISOString(),
     });
   }

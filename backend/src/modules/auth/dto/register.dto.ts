@@ -16,7 +16,9 @@ export class RegisterDto {
   })
   @IsNotEmpty({ message: 'Name is required' })
   @IsString()
-  @Transform(({ value }) => value?.trim())
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : '',
+  )
   name: string;
 
   @ApiProperty({
@@ -25,7 +27,9 @@ export class RegisterDto {
   })
   @IsNotEmpty({ message: 'Email is required' })
   @IsEmail({}, { message: 'Invalid email format' })
-  @Transform(({ value }) => value?.trim()?.toLowerCase())
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim().toLowerCase() : '',
+  )
   email: string;
 
   @ApiProperty({
@@ -38,7 +42,9 @@ export class RegisterDto {
     message:
       'Phone number must be a valid 11-digit Bangladeshi mobile number (e.g. 01712345678)',
   })
-  @Transform(({ value }) => value?.trim())
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : '',
+  )
   phone: string;
 
   @ApiProperty({

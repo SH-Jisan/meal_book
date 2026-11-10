@@ -25,7 +25,10 @@ export class RolesGuard implements CanActivate {
     }
 
     // ২. রিকোয়েস্ট অবজেক্ট থেকে লগইন করা ইউজারকে রিড করা (যা Passport পূর্বে req.user-এ বসিয়েছিল)
-    const { user } = context.switchToHttp().getRequest();
+    const request = context
+      .switchToHttp()
+      .getRequest<{ user?: { role?: Role } }>();
+    const user = request.user;
 
     if (!user) {
       throw new ForbiddenException('User session not found');

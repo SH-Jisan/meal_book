@@ -74,7 +74,7 @@ import { AppCacheModule } from './common/cache/cache.module';
             // ⚡ PING এবং SET টেস্ট (যাতে Limit Exceeded হলে সঙ্গে সঙ্গে ২য় রডিসে সুইচ করে)
             await pingClient.set('health_check', '1', 'EX', 10);
             await pingClient.quit();
-          } catch (err) {
+          } catch {
             console.warn(
               `⚠️ Primary Redis (${host}) limit reached or offline! Switched to Secondary Backup Redis (${secondaryHost}).`,
             );

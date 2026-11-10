@@ -7,8 +7,10 @@ import {
 } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { Cache } from 'cache-manager';
+import { Request, Response } from 'express';
 import { Observable, ReplaySubject } from 'rxjs';
 import { tap } from 'rxjs/operators';
+import { CacheKeys } from '../cache/cache-keys';
 
 export interface RouteMetric {
   path: string;
@@ -25,30 +27,31 @@ export interface RouteMetric {
   averageCpuMs: number;
   lastRequestedAt: string;
 }
-import { CacheKeys } from '../cache/cache-keys';
 
 @Injectable()
 export class MetricsInterceptor implements NestInterceptor {
   private static metricsMap = new Map<string, RouteMetric>();
   private static lastRedisSyncMap = new Map<string, number>();
   private static metricsSubject = new ReplaySubject<RouteMetric[]>(1);
-  private static readonly MAX_MAP_SIZE = 500;
 
   constructor(@Inject(CACHE_MANAGER) private cacheManager: Cache) {}
 
-  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
-    const request = context.switchToHttp().getRequest();
-    const response = context.switchToHttp().getResponse();
-    const { method, route } = request;
+  intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
+    const request = context
+      .switchToHttp()
+      .getRequest<Request & { route?: { path: string } }>();
+    const response = context.switchToHttp().getResponse<Response>();
+    const method = request.method;
+    const routePath = request.route?.path;
 
-    const path = route ? route.path : request.url.split('?')[0];
+    const path = routePath ? routePath : request.url.split('?')[0];
     const metricKey = `${method}:${path}`;
     const startTime = performance.now();
     const startMem = process.memoryUsage().heapUsed;
     const startCpu = process.cpuUsage();
 
     return next.handle().pipe(
-      tap(async () => {
+      tap(() => {
         const duration = Number((performance.now() - startTime).toFixed(2));
         const endMem = process.memoryUsage().heapUsed;
         const endCpu = process.cpuUsage(startCpu);
@@ -62,7 +65,9 @@ export class MetricsInterceptor implements NestInterceptor {
         const isSuccess = statusCode >= 200 && statusCode < 400;
 
         // ১. ইন-মেমোরি ম্যাপ আপডেট
-        const existing = MetricsInterceptor.metricsMap.get(metricKey) || {
+        const existing: RouteMetric = MetricsInterceptor.metricsMap.get(
+          metricKey,
+        ) || {
           path,
           method,
           totalRequests: 0,
@@ -103,7 +108,7 @@ export class MetricsInterceptor implements NestInterceptor {
 
         MetricsInterceptor.metricsMap.set(metricKey, existing);
 
-        // ⚡ 1. Real-time Instant SSE Stream Event Fire (Exclude internal system routes from event recursion)
+        // ⚡ 1. Real-time Instant SSE Stream Event Fire
         if (!path.startsWith('/system')) {
           MetricsInterceptor.metricsSubject.next(
             MetricsInterceptor.getMetricsList(),
@@ -111,19 +116,17 @@ export class MetricsInterceptor implements NestInterceptor {
         }
 
         // ⚡ ২. Upstash Redis-এ ৩০ দিনের TTL (2592000 seconds) দিয়ে সেভ করা
-        try {
-          const now = Date.now();
-          const lastSync =
-            MetricsInterceptor.lastRedisSyncMap.get(metricKey) || 0;
-          if (now - lastSync > 60000) {
-            MetricsInterceptor.lastRedisSyncMap.set(metricKey, now);
-            const currentMonth = new Date().toISOString().slice(0, 7); // e.g. "2026-07"
-            const redisKey = CacheKeys.monthlyMetrics(currentMonth, metricKey);
-            const ttlMs = 30 * 24 * 60 * 60 * 1000; // 30 Days Auto Expiration
-            await this.cacheManager.set(redisKey, existing, ttlMs);
-          }
-        } catch (err) {
-          // Redis Exception Handling
+        const now = Date.now();
+        const lastSync =
+          MetricsInterceptor.lastRedisSyncMap.get(metricKey) || 0;
+        if (now - lastSync > 60000) {
+          MetricsInterceptor.lastRedisSyncMap.set(metricKey, now);
+          const currentMonth = new Date().toISOString().slice(0, 7);
+          const redisKey = CacheKeys.monthlyMetrics(currentMonth, metricKey);
+          const ttlMs = 30 * 24 * 60 * 60 * 1000;
+          this.cacheManager.set(redisKey, existing, ttlMs).catch(() => {
+            // Redis Exception Handling
+          });
         }
       }),
     );

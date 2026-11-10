@@ -3,6 +3,13 @@ import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { NotificationService } from './notification.service';
 
+interface NotificationJobData {
+  userId?: string;
+  messId?: string;
+  title: string;
+  body: string;
+}
+
 @Processor('notification-queue', {
   drainDelay: 120,
   stalledInterval: 60000,
@@ -10,12 +17,14 @@ import { NotificationService } from './notification.service';
 export class NotificationProcessor extends WorkerHost {
   private readonly logger = new Logger(NotificationProcessor.name);
 
-  constructor(private readonly notificationService: NotificationService) {
+  constructor(private notificationService: NotificationService) {
     super();
   }
 
   // ব্যাকগ্রাউন্ডে যে জবগুলো প্রসেস হবে
-  async process(job: Job<any, any, string>): Promise<any> {
+  async process(
+    job: Job<NotificationJobData, unknown, string>,
+  ): Promise<unknown> {
     this.logger.log(
       `Processing background job '${job.name}' (Job ID: ${job.id})`,
     );
@@ -23,24 +32,31 @@ export class NotificationProcessor extends WorkerHost {
     switch (job.name) {
       case 'send-user-notification': {
         const { userId, title, body } = job.data;
-        return await this.notificationService.sendNotificationToUser(
-          userId,
-          title,
-          body,
-        );
+        if (userId) {
+          return await this.notificationService.sendNotificationToUser(
+            userId,
+            title,
+            body,
+          );
+        }
+        return null;
       }
 
       case 'send-mess-notification': {
         const { messId, title, body } = job.data;
-        return await this.notificationService.sendNotificationToMess(
-          messId,
-          title,
-          body,
-        );
+        if (messId) {
+          return await this.notificationService.sendNotificationToMess(
+            messId,
+            title,
+            body,
+          );
+        }
+        return null;
       }
 
       default:
         this.logger.warn(`Unknown job name: ${job.name}`);
+        return null;
     }
   }
 }

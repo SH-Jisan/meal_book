@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { InjectQueue } from '@nestjs/bullmq';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { Cron } from '@nestjs/schedule';
 import { HttpAdapterHost } from '@nestjs/core';
 import type { Cache } from 'cache-manager';
 import { Queue } from 'bullmq';
@@ -205,7 +205,7 @@ export class SystemService {
     try {
       await this.prisma.$queryRaw`SELECT 1`;
       dbLatencyMs = Date.now() - dbStartTime;
-    } catch (error) {
+    } catch {
       dbStatus = 'UNHEALTHY';
     }
 
@@ -223,7 +223,9 @@ export class SystemService {
         completed: counts.completed || 0,
         failed: counts.failed || 0,
       };
-    } catch (err) {}
+    } catch (_err) {
+      this.logger.debug('Suppressed error');
+    }
 
     let healthScore = 100;
     if (dbStatus !== 'HEALTHY') healthScore -= 40;
@@ -314,7 +316,9 @@ export class SystemService {
         });
         MetricsInterceptor.initializeRegisteredRoutes(routes);
       }
-    } catch (err) {}
+    } catch (_err) {
+      this.logger.debug('Suppressed error');
+    }
   }
 
   private formatUptime(seconds: number): string {

@@ -158,14 +158,16 @@ export class MealsService {
     return log;
   }
 
-  private checkDeadline(mess: any, type: string) {
-    const temp = 0;
+  private checkDeadline(
+    mess: { lunchEndTime?: string | null; dinnerEndTime?: string | null },
+    type: string,
+  ) {
     const now = new Date();
     const currentHour = now.getHours();
     const currentMinute = now.getMinutes();
 
     const deadlineString =
-      type === 'LUNCH' ? mess.lunchEndTime : mess.dinnerEndTime;
+      (type === 'LUNCH' ? mess.lunchEndTime : mess.dinnerEndTime) || '00:00';
     const [deadHour, deadMin] = deadlineString.split(':').map(Number);
 
     if (

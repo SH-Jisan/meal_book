@@ -7,6 +7,9 @@ import type { Cache } from 'cache-manager';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { Request } from 'express';
 import { CacheKeys } from '../../../common/cache/cache-keys';
+import { User } from '@prisma/client';
+
+export type SafeUser = Omit<User, 'hashedPassword' | 'hashedRefreshToken'>;
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
@@ -18,7 +21,9 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     super({
       jwtFromRequest: ExtractJwt.fromExtractors([
         ExtractJwt.fromAuthHeaderAsBearerToken(),
-        (req: Request) => req?.cookies?.accessToken || null,
+        (req: Request) =>
+          (req?.cookies as Record<string, string> | undefined)?.accessToken ||
+          null,
       ]),
       ignoreExpiration: false,
       secretOrKey: configService.get<string>('JWT_ACCESS_SECRET') as string,
@@ -29,11 +34,11 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   async validate(
     req: Request,
     payload: { sub: string; email: string; role?: string; iat?: number },
-  ) {
+  ): Promise<SafeUser> {
     // ⚡ 1. Check if Access Token is Blacklisted in Redis
     const token =
       ExtractJwt.fromAuthHeaderAsBearerToken()(req) ||
-      req?.cookies?.accessToken;
+      (req?.cookies as Record<string, string> | undefined)?.accessToken;
     if (token) {
       try {
         const isBlacklisted = await this.cacheManager.get(
@@ -42,7 +47,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         if (isBlacklisted) {
           throw new UnauthorizedException('Token has been revoked/logged out');
         }
-      } catch (err) {
+      } catch (err: unknown) {
         if (err instanceof UnauthorizedException) throw err;
       }
     }
@@ -58,17 +63,17 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
             'Session has been revoked by logout-all from another device',
           );
         }
-      } catch (err) {
+      } catch (err: unknown) {
         if (err instanceof UnauthorizedException) throw err;
       }
     }
 
     const cacheKey = CacheKeys.userProfile(payload.email);
 
-    let user: any = null;
+    let user: SafeUser | null = null;
     try {
-      user = await this.cacheManager.get(cacheKey);
-    } catch (err) {
+      user = (await this.cacheManager.get<SafeUser>(cacheKey)) ?? null;
+    } catch {
       user = null;
     }
 
@@ -80,12 +85,16 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       if (!dbUser) {
         throw new UnauthorizedException('User no longer exists');
       }
-      const { hashedPassword, hashedRefreshToken, ...safeUser } = dbUser;
+      const {
+        hashedPassword: _hashedPassword,
+        hashedRefreshToken: _hashedRefreshToken,
+        ...safeUser
+      } = dbUser;
       user = safeUser;
       try {
         await this.cacheManager.set(cacheKey, user, 900000);
-      } catch (err) {
-        //ignore error
+      } catch {
+        // ignore error
       }
     }
 

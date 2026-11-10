@@ -1,14 +1,14 @@
 export class EventEmitter2 {
-  emit(...args: any[]) {
+  emit(..._args: any[]) {
     return true;
   }
-  on(...args: any[]) {
+  on(..._args: any[]) {
     return this;
   }
 }
 
 export class EventEmitterModule {
-  static forRoot(...args: any[]) {
+  static forRoot(..._args: any[]) {
     return {
       module: EventEmitterModule,
       providers: [EventEmitter2],

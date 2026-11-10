@@ -354,7 +354,8 @@ export class BazaarService {
   // ৩. APPROVE BAZAAR & DEPOSIT (MANAGER ONLY)
   // -------------------------------------------------------------
   async approveBazaar(itemId: string, managerId: string) {
-    const { manager, mess } = await this.validator.validateManager(managerId);
+    const { manager: _manager, mess } =
+      await this.validator.validateManager(managerId);
 
     const item = await this.prisma.bazaarItem.findUnique({
       where: { id: itemId },
@@ -416,7 +417,8 @@ export class BazaarService {
   // ৪. REJECT BAZAAR & DEPOSIT (MANAGER ONLY)
   // -------------------------------------------------------------
   async rejectBazaar(itemId: string, dto: RejectBazaarDto, managerId: string) {
-    const { manager, mess } = await this.validator.validateManager(managerId);
+    const { manager: _manager, mess: _mess } =
+      await this.validator.validateManager(managerId);
 
     const item = await this.prisma.bazaarItem.findUnique({
       where: { id: itemId },

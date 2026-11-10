@@ -18,7 +18,7 @@ export class NotificationService implements OnModuleInit {
         this.logger.log('Firebase Admin SDK initialized successfully');
       }
       this.firebaseInitialized = true;
-    } catch (error) {
+    } catch {
       this.logger.warn(
         'Firebase credentials not configured yet. Push notifications will run in mock/log mode.',
       );
@@ -56,8 +56,8 @@ export class NotificationService implements OnModuleInit {
           notification: { title, body },
         });
         this.logger.log(`Push notification sent to user: ${userId}`);
-      } catch (error) {
-        this.logger.error(`Failed to send FCM push to user: ${userId}`, error);
+      } catch (err: unknown) {
+        this.logger.error(`Failed to send FCM push to user: ${userId}`, err);
       }
     }
 
@@ -100,8 +100,8 @@ export class NotificationService implements OnModuleInit {
         this.logger.log(
           `Multicast push sent to mess: ${messId} (${tokens.length} devices)`,
         );
-      } catch (error) {
-        this.logger.error(`Failed multicast push to mess: ${messId}`, error);
+      } catch (err: unknown) {
+        this.logger.error(`Failed multicast push to mess: ${messId}`, err);
       }
     }
   }

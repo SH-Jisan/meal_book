@@ -101,7 +101,7 @@ export class AuthService {
       });
 
       return { user, ...tokens };
-    } catch (error) {
+    } catch (error: unknown) {
       // 🛡️ RACE CONDITION DEFENSE: Catch Prisma duplicate key error P2002 cleanly
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -130,7 +130,7 @@ export class AuthService {
       );
       const outcome = await res.json();
       return outcome.success === true;
-    } catch (err) {
+    } catch (err: unknown) {
       this.logger.error('Turnstile verification request failed:', err);
       return true; // Fail-safe to avoid blocking legitimate users on network timeout
     }
@@ -144,7 +144,7 @@ export class AuthService {
     let user: any = null;
     try {
       user = await this.cacheManager.get(cacheKey);
-    } catch (err) {
+    } catch {
       user = null;
     }
 
@@ -157,9 +157,12 @@ export class AuthService {
       if (user) {
         try {
           // 🔒 FIX DRAWBACK 2: Exclude hashedRefreshToken and set 15-min TTL (900000ms) for high security
-          const { hashedRefreshToken, ...safeCachePayload } = user;
+          const {
+            hashedRefreshToken: _hashedRefreshToken,
+            ...safeCachePayload
+          } = user;
           await this.cacheManager.set(cacheKey, safeCachePayload, 900000);
-        } catch (err) {
+        } catch {
           // ignore error
         }
       }
@@ -194,7 +197,11 @@ export class AuthService {
     // ⚡ NON-BLOCKING: Background async execution so user gets instant sub-50ms response!
     this.updateRefreshToken(user.id, tokens.refreshToken).catch(() => {});
 
-    const { hashedPassword, hashedRefreshToken, ...userWithoutSecrets } = user;
+    const {
+      hashedPassword: _hashedPassword,
+      hashedRefreshToken: _hashedRefreshToken,
+      ...userWithoutSecrets
+    } = user;
     return { user: userWithoutSecrets, ...tokens };
   }
 
@@ -202,7 +209,7 @@ export class AuthService {
   async clearUserAuthCache(email: string) {
     try {
       await this.cacheManager.del(CacheKeys.userProfile(email));
-    } catch (err) {
+    } catch {
       // ignore error
     }
   }
@@ -232,7 +239,7 @@ export class AuthService {
       this.updateRefreshToken(user.id, tokens.refreshToken).catch(() => {});
 
       return tokens;
-    } catch (error) {
+    } catch {
       throw new UnauthorizedException('Invalid refresh token');
     }
   }
@@ -294,7 +301,7 @@ export class AuthService {
             900000,
           );
         }
-      } catch (err) {
+      } catch {
         // ignore
       }
     }
@@ -331,7 +338,7 @@ export class AuthService {
             900000,
           );
         }
-      } catch (err) {
+      } catch {
         // ignore
       }
     }

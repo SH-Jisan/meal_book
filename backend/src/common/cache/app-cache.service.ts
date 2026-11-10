@@ -103,10 +103,10 @@ export class AppCacheService {
       } else {
         this.recordEvent('MISS', key, 'Cache miss -> Querying Database');
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       // 🛡️ রডিস ডাউন বা Upstash লিমিট ওভার হলেও অ্যাপ ক্র্যাশ করবে না
       this.logger.warn(
-        `Redis Cache Get Error [${key}]: ${err.message || err}. Degrading gracefully to DB.`,
+        `Redis Cache Get Error [${key}]: ${err instanceof Error ? err.message : String(err)}. Degrading gracefully to DB.`,
       );
     }
 
@@ -122,9 +122,9 @@ export class AppCacheService {
           key,
           `Saved fresh data to Redis (TTL: ${Math.round(safeTtlMs / 1000)}s)`,
         );
-      } catch (err: any) {
+      } catch (err: unknown) {
         this.logger.warn(
-          `Redis Cache Set Error [${key}]: ${err.message || err}.`,
+          `Redis Cache Set Error [${key}]: ${err instanceof Error ? err.message : String(err)}.`,
         );
       }
     }
@@ -141,8 +141,10 @@ export class AppCacheService {
         this.recordEvent('MISS', key, 'Key not present in cache');
       }
       return cached;
-    } catch (err: any) {
-      this.logger.warn(`Redis Get Fail [${key}]: ${err.message}`);
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Redis Get Fail [${key}]: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return null;
     }
   }
@@ -152,8 +154,10 @@ export class AppCacheService {
       const ttlMs = Math.max(1, ttlSeconds) * 1000;
       await this.cacheManager.set(key, value, ttlMs);
       this.recordEvent('SET', key, `Direct cache write (TTL: ${ttlSeconds}s)`);
-    } catch (err: any) {
-      this.logger.warn(`Redis Set Fail [${key}]: ${err.message}`);
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Redis Set Fail [${key}]: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -161,8 +165,10 @@ export class AppCacheService {
     try {
       await this.cacheManager.del(key);
       this.recordEvent('DEL', key, 'Cache key invalidated');
-    } catch (err: any) {
-      this.logger.warn(`Redis Del Fail [${key}]: ${err.message}`);
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Redis Del Fail [${key}]: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -173,8 +179,10 @@ export class AppCacheService {
       for (const k of keys) {
         this.recordEvent('DEL', k, 'Batch invalidated');
       }
-    } catch (err: any) {
-      this.logger.warn(`Redis DelMany Fail: ${err.message}`);
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Redis DelMany Fail: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 }

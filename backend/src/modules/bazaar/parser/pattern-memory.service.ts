@@ -99,9 +99,9 @@ export class PatternMemoryService {
       this.logger.log(
         `Learned pattern "${cleanPhrase}" -> "${canonicalName}" (${source}) for mess: ${messId || 'GLOBAL'}`,
       );
-    } catch (err: any) {
+    } catch (err: unknown) {
       this.logger.warn(
-        `Failed to save learned pattern [${cleanPhrase}]: ${err.message}`,
+        `Failed to save learned pattern [${cleanPhrase}]: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

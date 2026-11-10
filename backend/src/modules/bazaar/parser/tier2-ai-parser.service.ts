@@ -1,51 +1,59 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { IBazaarParser, ParsedBazaarItem, ParsedBazaarResult } from './parser.interface';
+import {
+  IBazaarParser,
+  ParsedBazaarItem,
+  ParsedBazaarResult,
+} from './parser.interface';
 import { FuzzyNormalizer } from './fuzzy-normalizer';
+
+interface RawAiItem {
+  name?: string;
+  originalName?: string;
+  quantity?: number;
+  unit?: string;
+  cost?: number;
+}
+
+interface RawAiMemberDeposit {
+  memberName?: string;
+  amount?: number;
+}
+
+interface RawAiResponse {
+  depositAmount?: number;
+  items?: RawAiItem[];
+  memberDeposits?: RawAiMemberDeposit[];
+  warnings?: string[];
+}
+
+interface OpenAiChatResponse {
+  choices?: Array<{
+    message?: {
+      content?: string;
+    };
+  }>;
+}
+
+interface GeminiPart {
+  text?: string;
+}
+
+interface GeminiCandidate {
+  content?: {
+    parts?: GeminiPart[];
+  };
+}
+
+interface GeminiResponse {
+  candidates?: GeminiCandidate[];
+}
 
 @Injectable()
 export class Tier2AiParserService implements IBazaarParser {
   private readonly logger = new Logger(Tier2AiParserService.name);
 
   constructor(private configService: ConfigService) {}
-
-  /**
-   * Helper: Call Google Gemini API
-   */
-  private async callGemini(
-    apiKey: string,
-    model: string,
-    systemPromptWithContext: string,
-    rawText: string,
-  ): Promise<string> {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: `${systemPromptWithContext}\n\nUser Notes:\n${rawText}` }],
-          },
-        ],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.1,
-        },
-      }),
-    });
-
-    if (!response.ok) {
-      const errBody = await response.text();
-      throw new Error(`Gemini HTTP ${response.status}: ${errBody}`);
-    }
-
-    const data = await response.json();
-    const contentText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!contentText) throw new Error('Empty response from Gemini');
-    return contentText;
-  }
 
   /**
    * Helper: Call OpenAI-compatible LLM endpoints (Groq Cloud & OpenRouter)
@@ -75,6 +83,7 @@ export class Tier2AiParserService implements IBazaarParser {
         response_format: { type: 'json_object' },
         temperature: 0.1,
       }),
+      signal: AbortSignal.timeout(15000),
     });
 
     if (!response.ok) {
@@ -82,39 +91,114 @@ export class Tier2AiParserService implements IBazaarParser {
       throw new Error(`${providerName} HTTP ${response.status}: ${errBody}`);
     }
 
-    const data = await response.json();
+    const data = (await response.json()) as OpenAiChatResponse;
     const contentText = data?.choices?.[0]?.message?.content;
     if (!contentText) throw new Error(`Empty response from ${providerName}`);
     return contentText;
   }
 
-  async parse(rawText: string, managerName?: string): Promise<ParsedBazaarResult> {
+  /**
+   * Helper: Call Google Gemini API
+   */
+  private async callGemini(
+    apiKey: string,
+    model: string,
+    systemPromptWithContext: string,
+    rawText: string,
+  ): Promise<string> {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: `${systemPromptWithContext}\n\nUser Notes:\n${rawText}`,
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+        },
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      throw new Error(`Gemini HTTP ${response.status}: ${errBody}`);
+    }
+
+    const data = (await response.json()) as GeminiResponse;
+    const contentText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!contentText) throw new Error('Empty response from Gemini');
+    return contentText;
+  }
+
+  /**
+   * Helper: Extract pure JSON from potentially chatty LLM response
+   */
+  private extractJson(raw: string): RawAiResponse {
+    let s = raw.trim();
+
+    // Match code block markdown (```json ... ``` or ``` ... ```)
+    const codeBlockMatch = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (codeBlockMatch) {
+      s = codeBlockMatch[1].trim();
+    } else {
+      // Find outermost curly braces if surrounded by chatty text
+      const firstBrace = s.indexOf('{');
+      const lastBrace = s.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        s = s.substring(firstBrace, lastBrace + 1).trim();
+      }
+    }
+
+    return JSON.parse(s) as RawAiResponse;
+  }
+
+  async parse(
+    rawText: string,
+    managerName?: string,
+  ): Promise<ParsedBazaarResult> {
+    // 1. Primary AI (Default - Highest Performance): Groq Cloud (Ultra-Fast LPU)
+    const groqKey =
+      this.configService.get<string>('GROQ_API_KEY') ||
+      process.env.GROQ_API_KEY;
+    const groqModel =
+      this.configService.get<string>('GROQ_MODEL') ||
+      process.env.GROQ_MODEL ||
+      'openai/gpt-oss-120b';
+
+    // 2. Secondary AI (Backup 1 - High Accuracy): Google Gemini
     const geminiKey =
-      this.configService.get<string>('GEMINI_API_KEY') || process.env.GEMINI_API_KEY;
+      this.configService.get<string>('GEMINI_API_KEY') ||
+      process.env.GEMINI_API_KEY;
     const geminiModel =
       this.configService.get<string>('GEMINI_MODEL') ||
       process.env.GEMINI_MODEL ||
       'gemini-3.6-flash';
 
-    const groqKey =
-      this.configService.get<string>('GROQ_API_KEY') || process.env.GROQ_API_KEY;
-    const groqModel =
-      this.configService.get<string>('GROQ_MODEL') ||
-      process.env.GROQ_MODEL ||
-      'llama-3.3-70b-versatile';
-
+    // 3. Tertiary AI (Backup 2 - Free Aggregator): OpenRouter
     const openRouterKey =
       this.configService.get<string>('OPENROUTER_API_KEY') ||
       process.env.OPENROUTER_API_KEY;
     const openRouterModel =
       this.configService.get<string>('OPENROUTER_MODEL') ||
       process.env.OPENROUTER_MODEL ||
-      'meta-llama/llama-3.3-70b-instruct:free';
+      'liquid/lfm-2.5-2.6b:free';
 
-    const hasAnyKey = !!(geminiKey || groqKey || openRouterKey);
+    const hasAnyKey = !!(groqKey || geminiKey || openRouterKey);
 
     if (!hasAnyKey) {
-      this.logger.warn('No AI API Keys configured (GEMINI, GROQ, or OPENROUTER). Skipping AI parse.');
+      this.logger.warn(
+        'No AI API Keys configured (GROQ, GEMINI, or OPENROUTER). Skipping AI parse.',
+      );
       return {
         depositAmount: 0,
         items: [],
@@ -231,23 +315,9 @@ Output:
     const fallbackWarnings: string[] = [];
 
     // -------------------------------------------------------------
-    // Tier 2A: Primary AI - Google Gemini
+    // Tier 2A: Primary Default AI (Top Performance) - Groq Cloud
     // -------------------------------------------------------------
-    if (geminiKey) {
-      try {
-        rawJsonText = await this.callGemini(geminiKey, geminiModel, fullPrompt, rawText);
-        activeAiProvider = `Gemini (${geminiModel})`;
-        this.logger.log(`[Tier2Ai] Successfully parsed via Primary AI: ${activeAiProvider}`);
-      } catch (err: any) {
-        this.logger.warn(`[Tier2Ai] Primary AI (Gemini) failed: ${err.message}. Falling back to Secondary AI (Groq)...`);
-        fallbackWarnings.push(`Primary AI (Gemini) unavailable: ${err.message}`);
-      }
-    }
-
-    // -------------------------------------------------------------
-    // Tier 2B: Secondary AI - Groq Cloud (Ultra-Fast LPU)
-    // -------------------------------------------------------------
-    if (!rawJsonText && groqKey) {
+    if (groqKey) {
       try {
         rawJsonText = await this.callOpenAiCompatible(
           'https://api.groq.com/openai/v1/chat/completions',
@@ -258,16 +328,47 @@ Output:
           'Groq Cloud',
         );
         activeAiProvider = `Groq (${groqModel})`;
-        this.logger.log(`[Tier2Ai] Successfully parsed via Secondary AI: ${activeAiProvider}`);
-        fallbackWarnings.push(`Parsed via Secondary Failover: ${activeAiProvider}`);
-      } catch (err: any) {
-        this.logger.warn(`[Tier2Ai] Secondary AI (Groq) failed: ${err.message}. Falling back to Tertiary AI (OpenRouter)...`);
-        fallbackWarnings.push(`Secondary AI (Groq) unavailable: ${err.message}`);
+        this.logger.log(
+          `[Tier2Ai] Successfully parsed via Primary AI: ${activeAiProvider}`,
+        );
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[Tier2Ai] Primary AI (Groq) failed: ${message}. Falling back to Secondary Backup (Gemini)...`,
+        );
+        fallbackWarnings.push(`Primary AI (Groq) unavailable: ${message}`);
       }
     }
 
     // -------------------------------------------------------------
-    // Tier 2C: Tertiary AI - OpenRouter (Universal Free Aggregator)
+    // Tier 2B: Secondary Backup AI - Google Gemini
+    // -------------------------------------------------------------
+    if (!rawJsonText && geminiKey) {
+      try {
+        rawJsonText = await this.callGemini(
+          geminiKey,
+          geminiModel,
+          fullPrompt,
+          rawText,
+        );
+        activeAiProvider = `Gemini (${geminiModel})`;
+        this.logger.log(
+          `[Tier2Ai] Successfully parsed via Secondary Backup AI: ${activeAiProvider}`,
+        );
+        fallbackWarnings.push(
+          `Parsed via Secondary Backup: ${activeAiProvider}`,
+        );
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[Tier2Ai] Secondary AI (Gemini) failed: ${message}. Falling back to Tertiary Backup (OpenRouter)...`,
+        );
+        fallbackWarnings.push(`Secondary AI (Gemini) unavailable: ${message}`);
+      }
+    }
+
+    // -------------------------------------------------------------
+    // Tier 2C: Tertiary Backup AI - OpenRouter
     // -------------------------------------------------------------
     if (!rawJsonText && openRouterKey) {
       try {
@@ -284,11 +385,20 @@ Output:
           },
         );
         activeAiProvider = `OpenRouter (${openRouterModel})`;
-        this.logger.log(`[Tier2Ai] Successfully parsed via Tertiary AI: ${activeAiProvider}`);
-        fallbackWarnings.push(`Parsed via Tertiary Failover: ${activeAiProvider}`);
-      } catch (err: any) {
-        this.logger.error(`[Tier2Ai] Tertiary AI (OpenRouter) failed: ${err.message}`);
-        fallbackWarnings.push(`Tertiary AI (OpenRouter) unavailable: ${err.message}`);
+        this.logger.log(
+          `[Tier2Ai] Successfully parsed via Tertiary Backup AI: ${activeAiProvider}`,
+        );
+        fallbackWarnings.push(
+          `Parsed via Tertiary Backup: ${activeAiProvider}`,
+        );
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.error(
+          `[Tier2Ai] Tertiary AI (OpenRouter) failed: ${message}`,
+        );
+        fallbackWarnings.push(
+          `Tertiary AI (OpenRouter) unavailable: ${message}`,
+        );
       }
     }
 
@@ -296,7 +406,9 @@ Output:
     // If all configured AI providers failed or none responded
     // -------------------------------------------------------------
     if (!rawJsonText) {
-      this.logger.error('[Tier2Ai] All AI providers (Gemini, Groq, OpenRouter) failed or unconfigured.');
+      this.logger.error(
+        '[Tier2Ai] All AI providers (Groq, Gemini, OpenRouter) failed or unconfigured.',
+      );
       return {
         depositAmount: 0,
         items: [],
@@ -305,58 +417,76 @@ Output:
         engineUsed: 'TIER2_AI',
         confidence: 0,
         warnings: [
-          'All AI engines (Gemini, Groq, OpenRouter) are currently unavailable.',
+          'All AI engines (Groq, Gemini, OpenRouter) are currently unavailable.',
           ...fallbackWarnings,
         ],
       };
     }
 
     try {
-      // Clean possible markdown code fences from response (e.g. ```json ... ```)
-      const cleanJson = rawJsonText
-        .replace(/^\s*\`\`\`(?:json)?\s*/i, '')
-        .replace(/\s*\`\`\`\s*$/i, '')
-        .trim();
+      const parsedJson = this.extractJson(rawJsonText);
 
-      const parsedJson = JSON.parse(cleanJson);
+      const items: ParsedBazaarItem[] = (parsedJson.items || []).map(
+        (item: RawAiItem) => {
+          const rawName = item.originalName || item.name || 'Unknown';
+          const normalized = FuzzyNormalizer.normalize(rawName);
+          const finalName =
+            item.name && item.name.includes('(')
+              ? item.name
+              : normalized.confidence >= 0.9
+                ? normalized.canonicalName
+                : item.name || normalized.canonicalName;
 
-      const items: ParsedBazaarItem[] = (parsedJson.items || []).map((item: any) => {
-        const normalized = FuzzyNormalizer.normalize(item.originalName || item.name || 'Unknown');
-        const finalName =
-          item.name && item.name.includes('(')
-            ? item.name
-            : normalized.confidence >= 0.9
-              ? normalized.canonicalName
-              : item.name || normalized.canonicalName;
-
-        return {
-          name: finalName,
-          originalName: item.originalName || item.name || 'Unknown',
-          quantity: typeof item.quantity === 'number' && item.quantity > 0 ? item.quantity : 1,
-          unit: item.unit || normalized.defaultUnit,
-          cost: typeof item.cost === 'number' ? item.cost : 0,
-          confidence: 0.95,
-        };
-      });
+          return {
+            name: finalName,
+            originalName: rawName,
+            quantity:
+              typeof item.quantity === 'number' && item.quantity > 0
+                ? item.quantity
+                : 1,
+            unit: item.unit || normalized.defaultUnit,
+            cost: typeof item.cost === 'number' ? item.cost : 0,
+            confidence: 0.95,
+          };
+        },
+      );
 
       const totalCost = items.reduce((sum, item) => sum + item.cost, 0);
 
       // Multi-member deposit parsing (supports positive contributions and negative cash deductions)
       const memberDeposits = Array.isArray(parsedJson.memberDeposits)
         ? parsedJson.memberDeposits
-            .filter((m: any) => m && m.memberName && typeof m.amount === 'number' && m.amount !== 0)
-            .map((m: any) => ({
-              memberName: String(m.memberName).trim(),
-              amount: Number(m.amount),
+            .filter(
+              (
+                m,
+              ): m is RawAiMemberDeposit & {
+                memberName: string;
+                amount: number;
+              } =>
+                Boolean(
+                  m &&
+                  m.memberName &&
+                  typeof m.amount === 'number' &&
+                  m.amount !== 0,
+                ),
+            )
+            .map((m) => ({
+              memberName: m.memberName.trim(),
+              amount: m.amount,
             }))
         : undefined;
 
-      // Calculate total net deposit amount
+      // Calculate total net deposit amount:
+      // If memberDeposits is present, sum them up for guaranteed mathematical reconciliation.
+      // Otherwise fallback to parsedJson.depositAmount if valid number.
       const totalDeposit =
-        typeof parsedJson.depositAmount === 'number' && parsedJson.depositAmount !== 0
-          ? parsedJson.depositAmount
-          : memberDeposits && memberDeposits.length > 0
-            ? memberDeposits.reduce((sum: number, m: { amount: number }) => sum + m.amount, 0)
+        memberDeposits && memberDeposits.length > 0
+          ? memberDeposits.reduce(
+              (sum: number, m: { amount: number }) => sum + m.amount,
+              0,
+            )
+          : typeof parsedJson.depositAmount === 'number'
+            ? parsedJson.depositAmount
             : 0;
 
       const mergedWarnings = [
@@ -372,10 +502,16 @@ Output:
         engineUsed: 'TIER2_AI',
         confidence: 0.95,
         warnings: mergedWarnings,
-        memberDeposits: memberDeposits && memberDeposits.length > 0 ? memberDeposits : undefined,
+        memberDeposits:
+          memberDeposits && memberDeposits.length > 0
+            ? memberDeposits
+            : undefined,
       };
-    } catch (err: any) {
-      this.logger.error(`[Tier2Ai] JSON parsing error from ${activeAiProvider}: ${err.message}`);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `[Tier2Ai] JSON parsing error from ${activeAiProvider}: ${message}`,
+      );
       return {
         depositAmount: 0,
         items: [],
@@ -384,7 +520,7 @@ Output:
         engineUsed: 'TIER2_AI',
         confidence: 0,
         warnings: [
-          `Failed to parse JSON response from ${activeAiProvider}: ${err.message}`,
+          `Failed to parse JSON response from ${activeAiProvider}: ${message}`,
           ...fallbackWarnings,
         ],
       };

@@ -49,7 +49,6 @@ export class BillingService {
     });
 
     // 🔴 Invalidation: নতুন মাস শুরু হওয়ায় সামারির ক্যাশ ক্লিয়ার করা
-    const cacheKey = `billing:${mess.id}:${month.id}:summary`;
     // 📡 Event-Driven Cache Invalidation
     this.eventEmitter.emit(CacheEvents.BILLING_UPDATED, {
       messId: mess.id,
@@ -166,7 +165,6 @@ export class BillingService {
     });
 
     // 🔴 Invalidation: মাস বন্ধ হয়ে যাওয়ায় সামারির ক্যাশ ক্লিয়ার করা
-    const cacheKey = `billing:${mess.id}:${monthId}:summary`;
     // 📡 Event-Driven Cache Invalidation
     this.eventEmitter.emit(CacheEvents.BILLING_UPDATED, {
       messId: mess.id,
