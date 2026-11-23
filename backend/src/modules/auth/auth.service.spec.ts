@@ -10,6 +10,8 @@ import { Test, TestingModule } from '@nestjs/testing';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { AuthService } from './auth.service';
+import { TokenService } from './services/token.service';
+import { BotDefenseService } from './services/bot-defense.service';
 
 describe('AuthService (Unit Tests)', () => {
   let service: AuthService;
@@ -52,6 +54,8 @@ describe('AuthService (Unit Tests)', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,
+        TokenService,
+        BotDefenseService,
         { provide: PrismaService, useValue: mockPrismaService },
         { provide: JwtService, useValue: mockJwtService },
         { provide: ConfigService, useValue: mockConfigService },

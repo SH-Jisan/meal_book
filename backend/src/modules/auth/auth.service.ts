@@ -6,8 +6,6 @@ import {
   UnauthorizedException,
   Logger,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { Cache } from 'cache-manager';
 import * as bcrypt from 'bcrypt';
@@ -20,44 +18,24 @@ import { ChangePasswordDto } from './dto/change-password.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { Prisma } from '@prisma/client';
 import { CacheKeys } from '../../common/cache/cache-keys';
+import { TokenService } from './services/token.service';
+import { BotDefenseService } from './services/bot-defense.service';
 
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private prisma: PrismaService,
-    private jwtService: JwtService,
-    private configService: ConfigService,
+    private tokenService: TokenService,
+    private botDefense: BotDefenseService,
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {}
 
   // ১. মেম্বার রেজিস্ট্রেশন লজিক (Ultra Fast)
   async register(dto: RegisterDto) {
-    // 🛡️ ANTI-BOT DEFENSE 1: Honeypot Trap Check
-    if (dto.honeypot && dto.honeypot.trim().length > 0) {
-      this.logger.warn(
-        `🤖 BOT TRAPPED: Honeypot field filled by automated bot from email: ${dto.email}`,
-      );
-      throw new BadRequestException('Bot activity detected.');
-    }
-
-    const turnstileSecret = this.configService.get<string>(
-      'TURNSTILE_SECRET_KEY',
-    );
-    if (turnstileSecret) {
-      if (!dto.captchaToken) {
-        throw new BadRequestException('Captcha token is required.');
-      }
-      const isHuman = await this.verifyTurnstileToken(
-        dto.captchaToken,
-        turnstileSecret,
-      );
-      if (!isHuman) {
-        throw new BadRequestException(
-          'Captcha verification failed. Automated bot activity suspected.',
-        );
-      }
-    }
+    this.botDefense.verifyHoneypot(dto.honeypot, dto.email);
+    await this.botDefense.verifyTurnstile(dto.captchaToken);
 
     const existingUser = await this.prisma.user.findUnique({
       where: { email: dto.email },
@@ -68,11 +46,15 @@ export class AuthService {
     }
 
     const userId = crypto.randomUUID();
-    const tokens = await this.generateTokens(userId, dto.email, 'MEMBER');
+    const tokens = await this.tokenService.generateTokens(
+      userId,
+      dto.email,
+      'MEMBER',
+    );
 
     // ⚡ Fast SHA-256 for high-entropy Refresh Token (0.01ms CPU time)
     const hashedPassword = await bcrypt.hash(dto.password, 10);
-    const hashedRefreshToken = this.hashToken(tokens.refreshToken);
+    const hashedRefreshToken = this.tokenService.hashToken(tokens.refreshToken);
 
     // ⚛️ ATOMIC PRISMA TRANSACTION: Ensure user creation and welcome notification execute atomically
     try {
@@ -118,29 +100,6 @@ export class AuthService {
     }
   }
 
-  private async verifyTurnstileToken(
-    token: string,
-    secretKey: string,
-  ): Promise<boolean> {
-    try {
-      const formData = new URLSearchParams();
-      formData.append('secret', secretKey);
-      formData.append('response', token);
-      const res = await fetch(
-        'https://challenges.cloudflare.com/turnstile/v0/siteverify',
-        {
-          method: 'POST',
-          body: formData,
-        },
-      );
-      const outcome = await res.json();
-      return outcome.success === true;
-    } catch (err: unknown) {
-      this.logger.error('Turnstile verification request failed:', err);
-      return true; // Fail-safe to avoid blocking legitimate users on network timeout
-    }
-  }
-
   // ২. লগইন ভেরিফিকেশন লজিক (Ultra Fast Sub-50ms with Secure Redis Auth Cache)
   async login(dto: LoginDto) {
     const user = await this.prisma.user.findUnique({
@@ -163,9 +122,13 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    const tokens = await this.generateTokens(user.id, user.email, user.role);
+    const tokens = await this.tokenService.generateTokens(
+      user.id,
+      user.email,
+      user.role,
+    );
 
-    await this.updateRefreshToken(user.id, tokens.refreshToken);
+    await this.tokenService.updateRefreshToken(user.id, tokens.refreshToken);
 
     const {
       hashedPassword: _hashedPassword,
@@ -193,72 +156,48 @@ export class AuthService {
 
   // ৩. টোকেন রিফ্রেশ করার লজিক
   async refresh(dto: RefreshDto) {
-    try {
-      const payload = this.jwtService.verify(dto.refreshToken, {
-        secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
-      });
+    const payload = this.tokenService.verifyRefreshToken(dto.refreshToken);
 
-      const user = await this.prisma.user.findUnique({
-        where: { id: payload.sub },
-      });
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+    });
 
-      if (!user || !user.hashedRefreshToken) {
-        throw new UnauthorizedException('Access denied');
-      }
-
-      // ⚡ Fast SHA-256 Token Comparison
-      const hashedInput = this.hashToken(dto.refreshToken);
-      if (hashedInput !== user.hashedRefreshToken) {
-        throw new UnauthorizedException('Access denied');
-      }
-
-      const tokens = await this.generateTokens(user.id, user.email, user.role);
-      await this.updateRefreshToken(user.id, tokens.refreshToken);
-
-      return tokens;
-    } catch {
-      throw new UnauthorizedException('Invalid refresh token');
+    if (!user || !user.hashedRefreshToken) {
+      throw new UnauthorizedException('Access denied');
     }
+
+    // ⚡ Fast SHA-256 Token Comparison
+    const hashedInput = this.tokenService.hashToken(dto.refreshToken);
+    if (hashedInput !== user.hashedRefreshToken) {
+      throw new UnauthorizedException('Access denied');
+    }
+
+    const tokens = await this.tokenService.generateTokens(
+      user.id,
+      user.email,
+      user.role,
+    );
+    await this.tokenService.updateRefreshToken(user.id, tokens.refreshToken);
+
+    return tokens;
   }
 
-  // ৪. টোকেন জেনারেশন হেল্পার মেথড
+  // ৪. টোকেন জেনারেশন হেল্পার মেথড (Facade Delegation)
   async generateTokens(userId: string, email: string, role: string) {
-    const payload = { sub: userId, email, role };
-
-    const [accessToken, refreshToken] = await Promise.all([
-      this.jwtService.signAsync(payload, {
-        secret: this.configService.get<string>('JWT_ACCESS_SECRET'),
-        expiresIn: this.configService.get<string>(
-          'JWT_ACCESS_EXPIRATION',
-        ) as any,
-      }),
-      this.jwtService.signAsync(payload, {
-        secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
-        expiresIn: this.configService.get<string>(
-          'JWT_REFRESH_EXPIRATION',
-        ) as any,
-      }),
-    ]);
-
-    return { accessToken, refreshToken };
+    return this.tokenService.generateTokens(userId, email, role);
   }
 
-  // ⚡ ৫. High-Entropy SHA-256 Token Hash Helper (0.01ms speed)
-  private hashToken(token: string): string {
-    return crypto.createHash('sha256').update(token).digest('hex');
+  // ⚡ ৫. High-Entropy SHA-256 Token Hash Helper (Facade)
+  hashToken(token: string): string {
+    return this.tokenService.hashToken(token);
   }
 
   async updateRefreshToken(userId: string, refreshToken: string) {
-    const hashedRefreshToken = this.hashToken(refreshToken);
-    await this.prisma.user.update({
-      where: { id: userId },
-      data: { hashedRefreshToken },
-    });
+    return this.tokenService.updateRefreshToken(userId, refreshToken);
   }
 
   // 🔒 ৪.১ মেম্বার লগআউট (Access Token Blacklisting সহ)
   async logout(userId: string, email: string, accessToken?: string) {
-    // ⚡ ১. Parallel DB & Redis Operations (ল্যাটেন্সি ২৫ms থেকে কমে ৮ms-এ চলে আসবে)
     await Promise.all([
       this.prisma.user.update({
         where: { id: userId },
@@ -267,7 +206,6 @@ export class AuthService {
       this.clearUserAuthCache(email),
     ]);
 
-    // ⚡ ২. Access Token টি Redis Blacklist-এ রাখা (১৫ মিনিট TTL)
     if (accessToken) {
       try {
         const cleanToken = accessToken.replace('Bearer ', '').trim();
@@ -304,7 +242,6 @@ export class AuthService {
       this.clearUserAuthCache(email),
     ]);
 
-    // ⚡ Access Token Blacklisting for current device as well
     if (accessToken) {
       try {
         const cleanToken = accessToken.replace('Bearer ', '').trim();
@@ -346,7 +283,6 @@ export class AuthService {
     const salt = await bcrypt.genSalt(12);
     const hashedPassword = await bcrypt.hash(dto.newPassword, salt);
 
-    // পাসওয়ার্ড পরিবর্তনের পর অন্য সব ডিভাইসের সেশন ইনভ্যালিডেট করা
     const revocationTimestamp = Math.floor(Date.now() / 1000);
     await Promise.all([
       this.prisma.user.update({
