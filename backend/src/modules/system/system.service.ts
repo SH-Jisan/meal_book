@@ -54,7 +54,8 @@ export class SystemService {
         'WARN',
         `Manual Cache Clear Triggered [${type || 'ALL'}]`,
       );
-      await this.appCache.del(`* (Manual Cache Flush [${type || 'ALL'}])`);
+      // ⚡ Execute true Redis cache flush
+      await this.appCache.reset();
       return {
         success: true,
         message: `System Cache [${type || 'ALL'}] successfully invalidated`,

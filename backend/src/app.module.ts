@@ -26,10 +26,50 @@ import { AppCacheModule } from './common/cache/cache.module';
       validate,
     }),
     AppCacheModule,
-    CacheModule.register({
+    CacheModule.registerAsync({
       isGlobal: true,
-      ttl: 300000,
-      max: 500,
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: async (configService: ConfigService) => {
+        const host =
+          configService.get<string>('REDIS_HOST_1') ||
+          configService.get<string>('REDIS_HOST');
+        const port = Number(
+          configService.get<number>('REDIS_PORT_1') ||
+            configService.get<number>('REDIS_PORT') ||
+            6379,
+        );
+        const password =
+          configService.get<string>('REDIS_PASSWORD_1') ||
+          configService.get<string>('REDIS_PASSWORD');
+        const isTls =
+          (configService.get<string>('REDIS_TLS_1') ||
+            configService.get<string>('REDIS_TLS')) === 'true';
+
+        // ⚡ রডিস হোস্ট কনফিগার করা থাকলে আসল রডিস স্টোর লোড করা
+        if (host && host !== 'localhost' && host !== '127.0.0.1') {
+          try {
+            const { redisStore } = await import('cache-manager-redis-yet');
+            const store = await redisStore({
+              socket: {
+                host,
+                port,
+                tls: isTls,
+                connectTimeout: 3000,
+              },
+              password,
+              ttl: 300000,
+            });
+            return { store, ttl: 300000 };
+          } catch (err) {
+            console.warn(
+              '⚠️ Redis Cache store connection failed, falling back to in-memory store:',
+              err,
+            );
+          }
+        }
+        return { ttl: 300000, max: 500 };
+      },
     }),
     ThrottlerModule.forRoot([
       {
@@ -83,12 +123,24 @@ import { AppCacheModule } from './common/cache/cache.module';
           }
         }
 
+        const selectedPort =
+          host === secondaryHost
+            ? configService.get<number>('REDIS_PORT_2', 6379)
+            : configService.get<number>('REDIS_PORT_1') ||
+              configService.get<number>('REDIS_PORT', 6379);
+
+        const isTls =
+          host === secondaryHost
+            ? configService.get<string>('REDIS_TLS_2') === 'true'
+            : (configService.get<string>('REDIS_TLS_1') ||
+                configService.get<string>('REDIS_TLS')) === 'true';
+
         return {
           connection: {
             host,
-            port: 6379,
+            port: Number(selectedPort),
             password,
-            tls: {},
+            tls: isTls ? {} : undefined,
             maxRetriesPerRequest: null,
             enableOfflineQueue: false,
           },

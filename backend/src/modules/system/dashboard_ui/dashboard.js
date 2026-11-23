@@ -9,6 +9,33 @@ let openAccordionKeys = new Set();
 let cacheEvents = [];
 let selectedCacheAction = 'ALL';
 
+// 🛡️ Security Helper: HTML Entity Sanitizer to prevent XSS
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// 🔒 Auth Header Helper for Manager Protected Endpoints
+function getAuthHeaders() {
+  const token =
+    localStorage.getItem('accessToken') ||
+    sessionStorage.getItem('accessToken');
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function handleAuthChallenge() {
+  const token = prompt('🔒 Access Restricted: Please enter Manager Access Token (JWT):');
+  if (token && token.trim()) {
+    localStorage.setItem('accessToken', token.trim());
+    fetchMetrics();
+  }
+}
+
 // =========================================================================
 // 🎨 Standalone Enterprise Native HTML5 Canvas Engine (0 External Dependencies)
 // =========================================================================
@@ -136,7 +163,13 @@ function renderMemoryChart() {
 // =========================================================================
 async function fetchMetrics() {
   try {
-    const res = await fetch('/system/status?t=' + Date.now());
+    const res = await fetch('/system/status?t=' + Date.now(), {
+      headers: { ...getAuthHeaders() },
+    });
+    if (res.status === 401 || res.status === 403) {
+      handleAuthChallenge();
+      return;
+    }
     const json = await res.json();
     const data = json.data || json;
 
@@ -271,7 +304,10 @@ function renderTerminalLogs() {
   }
 
   container.innerHTML = filtered
-    .map((l) => `<div class="log-row log-${l.level}">[${l.time}] [${l.level}] ${l.message}</div>`)
+    .map(
+      (l) =>
+        `<div class="log-row log-${escapeHtml(l.level)}">[${escapeHtml(l.time)}] [${escapeHtml(l.level)}] ${escapeHtml(l.message)}</div>`,
+    )
     .join('');
 }
 
@@ -314,10 +350,10 @@ function renderCacheEvents() {
     .map(
       (e) => `
       <div class="cache-row">
-        <span class="cache-badge cache-badge-${e.action}">${e.action}</span>
-        <span class="cache-time">[${e.time}]</span>
-        <span class="cache-key">${e.key}</span>
-        <span class="cache-detail">${e.detail || ''}</span>
+        <span class="cache-badge cache-badge-${escapeHtml(e.action)}">${escapeHtml(e.action)}</span>
+        <span class="cache-time">[${escapeHtml(e.time)}]</span>
+        <span class="cache-key">${escapeHtml(e.key)}</span>
+        <span class="cache-detail">${escapeHtml(e.detail || '')}</span>
       </div>`,
     )
     .join('');
@@ -336,7 +372,14 @@ function filterCacheEvents(action, btnEl) {
 // Manual Cache & Queue Actions
 async function triggerClearCache() {
   try {
-    const res = await fetch('/system/cache/clear', { method: 'POST' });
+    const res = await fetch('/system/cache/clear', {
+      method: 'POST',
+      headers: { ...getAuthHeaders() },
+    });
+    if (res.status === 401 || res.status === 403) {
+      handleAuthChallenge();
+      return;
+    }
     const json = await res.json();
     alert('🧹 Cache Cleared: ' + (json.message || 'System Redis Cache Invalidated'));
     fetchMetrics();
@@ -347,7 +390,14 @@ async function triggerClearCache() {
 
 async function triggerRetryQueue() {
   try {
-    const res = await fetch('/system/queue/retry', { method: 'POST' });
+    const res = await fetch('/system/queue/retry', {
+      method: 'POST',
+      headers: { ...getAuthHeaders() },
+    });
+    if (res.status === 401 || res.status === 403) {
+      handleAuthChallenge();
+      return;
+    }
     const json = await res.json();
     alert('🔄 Queue Retried: ' + (json.message || 'BullMQ Jobs Retried'));
     fetchMetrics();

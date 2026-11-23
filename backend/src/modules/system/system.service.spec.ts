@@ -42,35 +42,45 @@ describe('SystemService (Unit Tests)', () => {
     del: jest.fn().mockResolvedValue(undefined),
   };
 
+  const mockAppCacheService = {
+    getTelemetry: jest.fn().mockReturnValue({
+      hits: 0,
+      misses: 0,
+      sets: 0,
+      deletions: 0,
+      totalOps: 0,
+      hitRatio: 100,
+      recentEvents: [],
+    }),
+    remember: jest.fn((k, ttl, fn) => fn()),
+    del: jest.fn(),
+    delMany: jest.fn(),
+    reset: jest.fn().mockResolvedValue(undefined),
+  };
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SystemService,
         { provide: PrismaService, useValue: mockPrismaService },
         { provide: HttpAdapterHost, useValue: mockAdapterHost },
-        { provide: CACHE_MANAGER, useValue: mockCacheManager }, // 👈 CACHE_MANAGER মক ইনজেক্ট করা হয়েছে
+        { provide: CACHE_MANAGER, useValue: mockCacheManager },
         { provide: getQueueToken('notification-queue'), useValue: mockQueue },
         {
           provide: AppCacheService,
-          useValue: {
-            getTelemetry: jest.fn().mockReturnValue({
-              hits: 0,
-              misses: 0,
-              sets: 0,
-              deletions: 0,
-              totalOps: 0,
-              hitRatio: 100,
-              recentEvents: [],
-            }),
-            remember: jest.fn((k, ttl, fn) => fn()),
-            del: jest.fn(),
-            delMany: jest.fn(),
-          },
+          useValue: mockAppCacheService,
         },
       ],
     }).compile();
 
     service = module.get<SystemService>(SystemService);
+    jest.clearAllMocks();
+  });
+
+  it('should call appCache.reset when clearSystemCache is invoked', async () => {
+    const result = await service.clearSystemCache('ALL');
+    expect(result.success).toBe(true);
+    expect(mockAppCacheService.reset).toHaveBeenCalled();
   });
 
   it('should return valid system metrics structure', async () => {

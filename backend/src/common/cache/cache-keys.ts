@@ -22,6 +22,10 @@ export class CacheKeys {
     return `mess:${messId}:members`;
   }
 
+  static messDetails(messId: string): string {
+    return `mess:${messId}:details`;
+  }
+
   // ৩. Meals মডিউলের জন্য ক্যাশ কি জেনারেটর
   static dailyMealLog(messId: string, dateStr: string): string {
     return `meals:${messId}:${dateStr}:daily`;
@@ -30,6 +34,10 @@ export class CacheKeys {
   // ৪. Bazaar মডিউলের জন্য ক্যাশ কি জেনারেটর
   static bazaarList(messId: string, monthId: string): string {
     return `bazaar:${messId}:${monthId}:list`;
+  }
+
+  static bazaarDeposits(messId: string, monthId: string): string {
+    return `bazaar:${messId}:${monthId}:deposits`;
   }
 
   // ৫. Billing মডিউলের জন্য ক্যাশ কি জেনারেটর

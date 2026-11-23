@@ -5,14 +5,24 @@ import {
   MessageEvent,
   Post,
   Sse,
+  UseGuards,
 } from '@nestjs/common';
-import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import * as fs from 'fs';
 import * as path from 'path';
 import { SystemService } from './system.service';
 import { MetricsInterceptor } from '../../common/interceptors/metrics.interceptors';
+import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { Role } from '@prisma/client';
 
 @ApiTags('System & Health Status')
 @Controller('system')
@@ -20,8 +30,12 @@ export class SystemController {
   constructor(private readonly systemService: SystemService) {}
 
   @Get('status')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.MANAGER)
+  @ApiBearerAuth()
   @ApiOperation({
-    summary: 'Get live system memory, CPU, uptime, and DB metrics',
+    summary:
+      'Get live system memory, CPU, uptime, and DB metrics (Manager only)',
   })
   @ApiResponse({
     status: 200,
@@ -32,13 +46,23 @@ export class SystemController {
   }
 
   @Post('cache/clear')
-  @ApiOperation({ summary: 'Manually invalidate system Redis caches' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.MANAGER)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Manually invalidate system Redis caches (Manager only)',
+  })
   clearCache() {
     return this.systemService.clearSystemCache('ALL');
   }
 
   @Post('queue/retry')
-  @ApiOperation({ summary: 'Retry failed BullMQ queue jobs' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.MANAGER)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Retry failed BullMQ queue jobs (Manager only)',
+  })
   retryQueue() {
     return this.systemService.retryFailedQueueJobs();
   }
@@ -76,17 +100,39 @@ export class SystemController {
   }
 
   private readFile(fileName: string): string {
-    const srcPath = path.join(
-      process.cwd(),
-      'src',
-      'modules',
-      'system',
-      'dashboard_ui',
-      fileName,
-    );
-    const distPath = path.join(__dirname, 'dashboard_ui', fileName);
+    const candidatePaths = [
+      path.join(
+        process.cwd(),
+        'src',
+        'modules',
+        'system',
+        'dashboard_ui',
+        fileName,
+      ),
+      path.join(__dirname, 'dashboard_ui', fileName),
+      path.join(
+        process.cwd(),
+        'dist',
+        'modules',
+        'system',
+        'dashboard_ui',
+        fileName,
+      ),
+      path.join(
+        process.cwd(),
+        'dist',
+        'src',
+        'modules',
+        'system',
+        'dashboard_ui',
+        fileName,
+      ),
+    ];
 
-    const filePath = fs.existsSync(srcPath) ? srcPath : distPath;
+    const filePath = candidatePaths.find((p) => fs.existsSync(p));
+    if (!filePath) {
+      throw new Error(`Dashboard asset file not found: ${fileName}`);
+    }
     return fs.readFileSync(filePath, 'utf8');
   }
 }

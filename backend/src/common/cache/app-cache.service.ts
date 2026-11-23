@@ -185,4 +185,20 @@ export class AppCacheService {
       );
     }
   }
+
+  // 🧹 আসল রডিস ক্যাশ সম্পূর্ণ রিসেট/ফ্লাশ মেথড
+  async reset(): Promise<void> {
+    try {
+      if (typeof this.cacheManager.clear === 'function') {
+        await this.cacheManager.clear();
+      } else if (typeof (this.cacheManager as any).reset === 'function') {
+        await (this.cacheManager as any).reset();
+      }
+      this.recordEvent('DEL', '*', 'Full cache flush executed');
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Redis Reset Fail: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 }

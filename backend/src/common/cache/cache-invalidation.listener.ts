@@ -25,15 +25,19 @@ export class CacheInvalidationListener {
   async handleFullMessReset(event: MessUpdatedEvent) {
     this.logger.log(`🧹 Wiping ALL Cache Keys for Mess [${event.messId}]`);
 
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Dhaka',
+    }).format(new Date());
     const keys = [
       CacheKeys.messMembers(event.messId),
+      CacheKeys.messDetails(event.messId),
       CacheKeys.dailyMealLog(event.messId, todayStr),
     ];
 
     if (event.monthId) {
       keys.push(
         CacheKeys.bazaarList(event.messId, event.monthId),
+        CacheKeys.bazaarDeposits(event.messId, event.monthId),
         CacheKeys.billingSummary(event.messId, event.monthId),
       );
     }
@@ -48,6 +52,7 @@ export class CacheInvalidationListener {
     );
     const keys = [
       CacheKeys.messMembers(event.messId),
+      CacheKeys.messDetails(event.messId),
       CacheKeys.userProfile(event.memberEmail),
     ];
     if (event.managerEmail) {
@@ -63,6 +68,7 @@ export class CacheInvalidationListener {
     );
     const keys = [
       CacheKeys.messMembers(event.messId),
+      CacheKeys.messDetails(event.messId),
       CacheKeys.userProfile(event.memberEmail),
     ];
     if (event.monthId) {
@@ -78,6 +84,7 @@ export class CacheInvalidationListener {
     );
     const keys = [
       CacheKeys.messMembers(event.messId),
+      CacheKeys.messDetails(event.messId),
       CacheKeys.userProfile(event.oldManagerEmail),
       CacheKeys.userProfile(event.newManagerEmail),
     ];
@@ -91,6 +98,7 @@ export class CacheInvalidationListener {
     );
     const keys = [
       CacheKeys.bazaarList(event.messId, event.monthId),
+      CacheKeys.bazaarDeposits(event.messId, event.monthId),
       CacheKeys.billingSummary(event.messId, event.monthId),
     ];
     await this.appCache.delMany(keys);
@@ -101,9 +109,10 @@ export class CacheInvalidationListener {
     this.logger.log(
       `🧹 Invalidating Billing Summary cache for Mess [${event.messId}]`,
     );
-    await this.appCache.del(
+    await this.appCache.delMany([
       CacheKeys.billingSummary(event.messId, event.monthId),
-    );
+      CacheKeys.bazaarDeposits(event.messId, event.monthId),
+    ]);
   }
 
   @OnEvent(CacheEvents.MEAL_UPDATED)
