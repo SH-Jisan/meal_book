@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -13,6 +22,7 @@ import { Role } from '@prisma/client';
 import { CreateMessDto } from './dto/create-mess.dto';
 import { JoinMessDto } from './dto/join-mess.dto';
 import { TransferManagerDto } from './dto/transfer-manager.dto';
+import { UpdateMessSettingsDto } from './dto/update-mess-settings.dto';
 import { MessService } from './mess.service';
 
 @ApiTags('Mess Management')
@@ -50,6 +60,47 @@ export class MessController {
   @ApiResponse({ status: 200, description: 'List of members returned.' })
   getMembers(@CurrentUser() user: { id: string }) {
     return this.messService.getMembers(user.id);
+  }
+
+  @Get('current')
+  @ApiOperation({
+    summary:
+      'Get current mess details including name, code, manager, and deadlines',
+  })
+  @ApiResponse({ status: 200, description: 'Current mess details returned.' })
+  getMessDetails(@CurrentUser() user: { id: string }) {
+    return this.messService.getMessDetails(user.id);
+  }
+
+  @Patch('settings')
+  @UseGuards(RolesGuard)
+  @Roles(Role.MANAGER)
+  @ApiOperation({
+    summary: 'Update mess name and meal deadline times (Manager Only)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Mess settings updated successfully.',
+  })
+  updateMessSettings(
+    @Body() dto: UpdateMessSettingsDto,
+    @CurrentUser() user: { id: string },
+  ) {
+    return this.messService.updateMessSettings(dto, user.id);
+  }
+
+  @Delete('members/:id')
+  @UseGuards(RolesGuard)
+  @Roles(Role.MANAGER)
+  @ApiOperation({
+    summary: 'Remove/kick an unwanted member from the mess (Manager Only)',
+  })
+  @ApiResponse({ status: 200, description: 'Member removed successfully.' })
+  removeMember(
+    @Param('id') memberId: string,
+    @CurrentUser() user: { id: string },
+  ) {
+    return this.messService.removeMember(memberId, user.id);
   }
 
   @Post('leave')
