@@ -1,8 +1,10 @@
 import {
   Body,
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
+  Patch,
   Post,
   Req,
   Res,
@@ -19,6 +21,8 @@ import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { RegisterDto } from './dto/register.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/user.decorator';
 import { Throttle } from '@nestjs/throttler';
@@ -107,6 +111,50 @@ export class AuthController {
       path: '/auth',
     });
     return this.authService.logoutAllDevices(user.id, user.email, authHeader);
+  }
+
+  @Post('change-password')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Change current account password' })
+  @ApiResponse({ status: 200, description: 'Password changed successfully.' })
+  @ApiResponse({ status: 401, description: 'Current password does not match.' })
+  changePassword(
+    @Body() dto: ChangePasswordDto,
+    @CurrentUser() user: { id: string },
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    res.clearCookie('refreshToken', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/auth',
+    });
+    return this.authService.changePassword(dto, user.id);
+  }
+
+  @Patch('profile')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Update user name or phone number' })
+  @ApiResponse({ status: 200, description: 'Profile updated successfully.' })
+  updateProfile(
+    @Body() dto: UpdateProfileDto,
+    @CurrentUser() user: { id: string },
+  ) {
+    return this.authService.updateProfile(dto, user.id);
+  }
+
+  @Get('profile')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get current authenticated user profile' })
+  @ApiResponse({ status: 200, description: 'Profile returned.' })
+  getProfile(@CurrentUser() user: { id: string }) {
+    return this.authService.getProfile(user.id);
   }
 
   private setRefreshTokenCookie(res: Response, refreshToken: string) {

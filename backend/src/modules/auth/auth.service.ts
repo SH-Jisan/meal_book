@@ -16,6 +16,8 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { LoginDto } from './dto/login.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { RegisterDto } from './dto/register.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import { Prisma } from '@prisma/client';
 import { CacheKeys } from '../../common/cache/cache-keys';
 
@@ -42,7 +44,10 @@ export class AuthService {
     const turnstileSecret = this.configService.get<string>(
       'TURNSTILE_SECRET_KEY',
     );
-    if (turnstileSecret && dto.captchaToken) {
+    if (turnstileSecret) {
+      if (!dto.captchaToken) {
+        throw new BadRequestException('Captcha token is required.');
+      }
       const isHuman = await this.verifyTurnstileToken(
         dto.captchaToken,
         turnstileSecret,
@@ -138,49 +143,15 @@ export class AuthService {
 
   // ২. লগইন ভেরিফিকেশন লজিক (Ultra Fast Sub-50ms with Secure Redis Auth Cache)
   async login(dto: LoginDto) {
-    const cacheKey = CacheKeys.userProfile(dto.email);
-
-    // ⚡ 1. Ultra-fast 1ms Redis User Auth Check (Skips 60ms PostgreSQL network trip!)
-    let user: any = null;
-    try {
-      user = await this.cacheManager.get(cacheKey);
-    } catch {
-      user = null;
-    }
-
-    if (!user) {
-      // 🗄️ 2. Fallback to Supabase Database if not in Redis
-      user = await this.prisma.user.findUnique({
-        where: { email: dto.email },
-      });
-
-      if (user) {
-        try {
-          // 🔒 FIX DRAWBACK 2: Exclude hashedRefreshToken and set 15-min TTL (900000ms) for high security
-          const {
-            hashedRefreshToken: _hashedRefreshToken,
-            ...safeCachePayload
-          } = user;
-          await this.cacheManager.set(cacheKey, safeCachePayload, 900000);
-        } catch {
-          // ignore error
-        }
-      }
-    }
+    const user = await this.prisma.user.findUnique({
+      where: { email: dto.email },
+    });
 
     if (!user || !user.hashedPassword) {
-      // 🗄️ Fallback to Supabase Database if not in Redis or missing password hash
-      const dbUser = await this.prisma.user.findUnique({
-        where: { email: dto.email },
-      });
-
-      if (!dbUser) {
-        throw new UnauthorizedException('Invalid credentials');
-      }
-      user = dbUser;
+      throw new UnauthorizedException('Invalid credentials');
     }
 
-    if (!dto?.password || !user?.hashedPassword) {
+    if (!dto?.password) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -194,15 +165,21 @@ export class AuthService {
 
     const tokens = await this.generateTokens(user.id, user.email, user.role);
 
-    // ⚡ NON-BLOCKING: Background async execution so user gets instant sub-50ms response!
-    this.updateRefreshToken(user.id, tokens.refreshToken).catch(() => {});
+    await this.updateRefreshToken(user.id, tokens.refreshToken);
 
     const {
       hashedPassword: _hashedPassword,
       hashedRefreshToken: _hashedRefreshToken,
-      ...userWithoutSecrets
+      ...safeUser
     } = user;
-    return { user: userWithoutSecrets, ...tokens };
+
+    const cacheKey = CacheKeys.userProfile(dto.email);
+    try {
+      await this.cacheManager.set(cacheKey, safeUser, 900000);
+    } catch {
+      //
+    }
+    return { user: safeUser, ...tokens };
   }
 
   // 🔒 FIX DRAWBACK 1: Helper method to invalidate stale user cache when profile/password is updated
@@ -236,7 +213,7 @@ export class AuthService {
       }
 
       const tokens = await this.generateTokens(user.id, user.email, user.role);
-      this.updateRefreshToken(user.id, tokens.refreshToken).catch(() => {});
+      await this.updateRefreshToken(user.id, tokens.refreshToken);
 
       return tokens;
     } catch {
@@ -347,5 +324,96 @@ export class AuthService {
       `🔒 SECURITY AUDIT: User [${userId}] (${email}) logged out from ALL devices.`,
     );
     return { message: 'Successfully logged out from all devices' };
+  }
+
+  // 🔒 ৫. পাসওয়ার্ড পরিবর্তন (Change Password)
+  async changePassword(dto: ChangePasswordDto, userId: string) {
+    const user = await this.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+    });
+
+    const isMatch = await bcrypt.compare(dto.oldPassword, user.hashedPassword);
+    if (!isMatch) {
+      throw new UnauthorizedException('Current password does not match.');
+    }
+
+    if (dto.oldPassword === dto.newPassword) {
+      throw new BadRequestException(
+        'New password cannot be the same as current password.',
+      );
+    }
+
+    const salt = await bcrypt.genSalt(12);
+    const hashedPassword = await bcrypt.hash(dto.newPassword, salt);
+
+    // পাসওয়ার্ড পরিবর্তনের পর অন্য সব ডিভাইসের সেশন ইনভ্যালিডেট করা
+    const revocationTimestamp = Math.floor(Date.now() / 1000);
+    await Promise.all([
+      this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          hashedPassword,
+          hashedRefreshToken: null,
+        },
+      }),
+      this.cacheManager
+        .set(CacheKeys.logoutAll(userId), revocationTimestamp, 900000)
+        .catch(() => {}),
+      this.clearUserAuthCache(user.email),
+    ]);
+
+    this.logger.log(`🔒 SECURITY: User [${userId}] changed their password.`);
+    return { message: 'Password changed successfully. Please log in again.' };
+  }
+
+  // 👤 ৬. প্রোফাইল এডিট (Update Profile)
+  async updateProfile(dto: UpdateProfileDto, userId: string) {
+    const user = await this.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+    });
+
+    const updateData: Record<string, any> = {};
+    if (dto.name) updateData.name = dto.name;
+    if (dto.phone) updateData.phone = dto.phone;
+
+    if (Object.keys(updateData).length === 0) {
+      throw new BadRequestException('No valid fields provided to update.');
+    }
+
+    const updatedUser = await this.prisma.user.update({
+      where: { id: userId },
+      data: updateData,
+    });
+
+    await this.clearUserAuthCache(user.email);
+
+    const {
+      hashedPassword: _hashedPassword,
+      hashedRefreshToken: _hashedRefreshToken,
+      ...safeUser
+    } = updatedUser;
+
+    return {
+      message: 'Profile updated successfully',
+      user: safeUser,
+    };
+  }
+
+  // 👤 ৭. বর্তমান লগইনকৃত ইউজারের প্রোফাইল লোড করা (Get Profile)
+  async getProfile(userId: string) {
+    const user = await this.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        role: true,
+        messId: true,
+        joinedAt: true,
+        createdAt: true,
+      },
+    });
+    return user;
   }
 }

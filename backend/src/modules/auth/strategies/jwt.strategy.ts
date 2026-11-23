@@ -98,6 +98,13 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       }
     }
 
-    return user;
+    // 🔒 DEFENSE-IN-DEPTH: নিশ্চিত করা যে req.user-এ কখনই hashedPassword যাবে না
+    const {
+      hashedPassword: _hashedPassword,
+      hashedRefreshToken: _hashedRefreshToken,
+      ...sanitizedUser
+    } = user as any;
+
+    return sanitizedUser as SafeUser;
   }
 }
