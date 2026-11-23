@@ -1,6 +1,7 @@
 import { FuzzyNormalizer, ItemDefinition } from './fuzzy-normalizer';
 import {
   IBazaarParser,
+  MemberContribution,
   ParsedBazaarItem,
   ParsedBazaarResult,
 } from './parser.interface';
@@ -103,6 +104,7 @@ export class Tier1RegexParser implements IBazaarParser {
     let depositAmount = 0;
     const items: ParsedBazaarItem[] = [];
     const warnings: string[] = [];
+    const memberDeposits: MemberContribution[] = [];
 
     // ১. কম্বাইন্ড ডিপোজিট ও ফেরত রিজেক্স (যেমন: "taka disi 3000 ferot nisi 500", "manager dilo 2000 ferot 300")
     const combinedDepositReturnRegex =
@@ -112,9 +114,16 @@ export class Tier1RegexParser implements IBazaarParser {
     const standaloneReturnRegex =
       /^(?:(?:ferot|pherot|ফেরত|baki|বাকি|change|back)\s*(?:nisi|nilam|nilo|dilam|disi)?|(?:taka\s+)?(?:ferot|ফেরত))\s*[:=-]?\s*(\d+(?:,\d+)*(?:\.\d+)?k?)\s*(?:tk|taka|টাকা|\/-)?$/i;
 
-    // ৩. সাধারণ ডিপোজিট রিজেক্স (যেমন: "ami taka disi 2000", "deposit 1.5k")
+    // ৩. ক্রেতার সাধারণ ডিপোজিট রিজেক্স (যেমন: "ami taka disi 2000", "ami disi 2000", "ami 2000", "deposit 1.5k")
     const depositRegex =
-      /^(?:ami\s+)?(?:taka\s+disi|taka\s+joma|deposit|joma|টাকা\s*জমা|manager\s+(?:dilo|dise)|paisi|টাকা|টাকা\s+দিসি)\s*[:=-]?\s*(\d+(?:,\d+)*(?:\.\d+)?k?)\s*(?:tk|taka|টাকা|\/-)?$/i;
+      /^(?:(?:ami|me)\s+)?(?:taka\s+disi|taka\s+joma|deposit|joma|disi|দিসি|টাকা\s*জমা|manager\s+(?:dilo|dise)|paisi|টাকা|টাকা\s+দিসি)\s*[:=-]?\s*(\d+(?:,\d+)*(?:\.\d+)?k?)\s*(?:tk|taka|টাকা|\/-)?$/i;
+
+    const shopperDirectRegex =
+      /^(?:ami|me)\s*[:=-]?\s*(\d+(?:,\d+)*(?:\.\d+)?k?)\s*(?:tk|taka|টাকা|\/-)?$/i;
+
+    // ৩.৫ অন্যান্য মেম্বারদের ডিপোজিট রিজেক্স (যেমন: "korim dise 500", "rohim dilo 1000", "jisan 1.5k")
+    const memberDepositWithVerbRegex =
+      /^([a-zA-Z\u0980-\u09FF\s]+?)\s+(?:dise|dilo|dse|dis|dilam|দিছে|দিলো|দিসে|দিসি|joma|জমা)\s*[:=-]?\s*(\d+(?:,\d+)*(?:\.\d+)?k?)\s*(?:tk|taka|টাকা|\/-)?$/i;
 
     // ৪. ফুল বাজার আইটেম রিজেক্স (নাম + পরিমাণ + একক + দাম)
     const unitPattern =
@@ -154,12 +163,36 @@ export class Tier1RegexParser implements IBazaarParser {
         continue;
       }
 
-      // গ. সাধারণ ডিপোজিট চেক
-      const depositMatch = normalizedLine.match(depositRegex);
+      // গ.১ ক্রেতার সাধারণ ডিপোজিট চেক
+      const depositMatch =
+        normalizedLine.match(depositRegex) ||
+        normalizedLine.match(shopperDirectRegex);
       if (depositMatch) {
         depositAmount += Tier1RegexParser.parseNumberWithMultiplier(
           depositMatch[1],
         );
+        continue;
+      }
+
+      // গ.২ অন্যান্য মেম্বারদের ডিপোজিট চেক (যেমন: "korim dise 500")
+      const memberVerbMatch = normalizedLine.match(memberDepositWithVerbRegex);
+      if (memberVerbMatch) {
+        const contributorName = memberVerbMatch[1].trim();
+        const amount = Tier1RegexParser.parseNumberWithMultiplier(
+          memberVerbMatch[2],
+        );
+        const isShopper = ['ami', 'me', 'nijer'].some((k) =>
+          contributorName.toLowerCase().includes(k),
+        );
+
+        if (isShopper) {
+          depositAmount += amount;
+        } else {
+          memberDeposits.push({
+            memberName: contributorName,
+            amount,
+          });
+        }
         continue;
       }
 
@@ -195,7 +228,26 @@ export class Tier1RegexParser implements IBazaarParser {
         const rawItemName = simpleMatch[1].trim();
         const cost = Tier1RegexParser.parseNumberWithMultiplier(simpleMatch[2]);
 
+        // 🛡️ গার্ড ১: ডিপোজিট বা ফেরত সংক্রান্ত শব্দ হলে এটিকে খাবার আইটেম বানানো যাবে না
+        const isDepositWord =
+          /(?:dise|dilo|dse|disi|ferot|pherot|baki|taka|টাকা|জমা|ফেরত)/i.test(
+            rawItemName,
+          );
+        if (isDepositWord) {
+          warnings.push(
+            `Ambiguous deposit line: "${rawLine}" -> Delegating to AI`,
+          );
+          continue;
+        }
+
         const normalized = FuzzyNormalizer.normalize(rawItemName, dynamicItems);
+
+        // 🛡️ গার্ড ২: অপরিচিত কোনো খাদ্য আইটেম না হলে (Confidence < 0.70)
+        // এটি কোনো মেম্বারের নাম হতে পারে (যেমন: "rohim 500")
+        if (normalized.confidence < 0.7) {
+          warnings.push(`Unverified item or deposit: "${rawLine}"`);
+          continue;
+        }
 
         items.push({
           name: normalized.canonicalName,
@@ -271,7 +323,10 @@ export class Tier1RegexParser implements IBazaarParser {
         0.1,
         Number((avgItemConfidence - unparsedCount * 0.3).toFixed(2)),
       );
-    } else if (depositAmount > 0 && unparsedCount === 0) {
+    } else if (
+      (depositAmount > 0 || memberDeposits.length > 0) &&
+      unparsedCount === 0
+    ) {
       overallConfidence = 1.0;
     }
 
@@ -283,6 +338,7 @@ export class Tier1RegexParser implements IBazaarParser {
       engineUsed: 'TIER1_REGEX',
       confidence: overallConfidence,
       warnings,
+      memberDeposits: memberDeposits.length > 0 ? memberDeposits : undefined,
     };
   }
 }

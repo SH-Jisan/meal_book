@@ -1,4 +1,5 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { ForbiddenException } from '@nestjs/common';
 import { getQueueToken } from '@nestjs/bullmq';
 import { Test, TestingModule } from '@nestjs/testing';
 import { PrismaService } from '../../common/prisma/prisma.service';
@@ -30,6 +31,7 @@ describe('BazaarService (Unit Tests)', () => {
         }),
       ),
       findMany: jest.fn().mockResolvedValue([]),
+      delete: jest.fn().mockResolvedValue({ id: 'item_1' }),
     },
     deposit: {
       create: jest.fn().mockImplementation(({ data }) =>
@@ -40,6 +42,8 @@ describe('BazaarService (Unit Tests)', () => {
       ),
       update: jest.fn().mockResolvedValue({ id: 'dep_1', status: 'APPROVED' }),
       updateMany: jest.fn().mockResolvedValue({ count: 3 }),
+      findMany: jest.fn().mockResolvedValue([]),
+      findUniqueOrThrow: jest.fn(),
     },
     monthlyData: {
       update: jest.fn().mockResolvedValue({}),
@@ -309,15 +313,31 @@ describe('BazaarService (Unit Tests)', () => {
   });
 
   describe('approveBazaar', () => {
-    it('should approve pending bazaar item and all linked deposits (multi-member)', async () => {
+    it('should throw ForbiddenException if approving bazaar item belonging to another mess', async () => {
+      mockPrismaService.bazaarItem.findUnique.mockResolvedValue({
+        id: 'item_1',
+        cost: 200,
+        status: 'PENDING_APPROVAL',
+        monthId: 'other_month',
+        month: { id: 'other_month', messId: 'other_mess_id' },
+      });
+
+      await expect(
+        service.approveBazaar('item_1', 'manager_1'),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('should approve pending bazaar item, link deposits, and increment monthly total bazaar cost', async () => {
       mockPrismaService.bazaarItem.findUnique.mockResolvedValue({
         id: 'item_1',
         cost: 200,
         status: 'PENDING_APPROVAL',
         depositId: 'dep_1',
         shopperId: 'user_rafi',
+        monthId: 'month_1',
+        month: { id: 'month_1', messId: 'mess_1' },
       });
-      mockPrismaService.bazaarItem.update.mockResolvedValue({
+      mockPrismaService.bazaarItem.update.mockResolvedValueOnce({
         id: 'item_1',
         status: 'COMPLETED',
         depositId: 'dep_1',
@@ -332,10 +352,28 @@ describe('BazaarService (Unit Tests)', () => {
         },
         data: { status: 'APPROVED' },
       });
+      expect(mockPrismaService.monthlyData.update).toHaveBeenCalledWith({
+        where: { id: 'month_1' },
+        data: { totalBazaarCost: { increment: 200 } },
+      });
     });
   });
 
   describe('rejectBazaar', () => {
+    it('should throw ForbiddenException if rejecting bazaar item belonging to another mess', async () => {
+      mockPrismaService.bazaarItem.findUnique.mockResolvedValue({
+        id: 'item_1',
+        cost: 200,
+        status: 'PENDING_APPROVAL',
+        monthId: 'other_month',
+        month: { id: 'other_month', messId: 'other_mess_id' },
+      });
+
+      await expect(
+        service.rejectBazaar('item_1', { reason: 'wrong' }, 'manager_1'),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
     it('should reject pending bazaar item and all linked deposits (multi-member)', async () => {
       mockPrismaService.bazaarItem.findUnique.mockResolvedValue({
         id: 'item_1',
@@ -343,8 +381,10 @@ describe('BazaarService (Unit Tests)', () => {
         status: 'PENDING_APPROVAL',
         depositId: 'dep_1',
         shopperId: 'user_rafi',
+        monthId: 'month_1',
+        month: { id: 'month_1', messId: 'mess_1' },
       });
-      mockPrismaService.bazaarItem.update.mockResolvedValue({
+      mockPrismaService.bazaarItem.update.mockResolvedValueOnce({
         id: 'item_1',
         status: 'REJECTED',
         depositId: 'dep_1',
@@ -362,6 +402,183 @@ describe('BazaarService (Unit Tests)', () => {
           OR: [{ bazaarItemId: 'item_1' }, { id: 'dep_1' }],
         },
         data: { status: 'REJECTED' },
+      });
+    });
+
+    it('should return deposits list for current month', async () => {
+      mockPrismaService.deposit.findMany.mockResolvedValueOnce([
+        {
+          id: 'dep_1',
+          amount: 1500,
+          status: 'APPROVED',
+          user: { name: 'Jisan' },
+        },
+      ]);
+
+      const deposits = await service.getDeposits('user_1');
+      expect(deposits).toHaveLength(1);
+      expect(deposits[0].amount).toBe(1500);
+      expect(mockPrismaService.deposit.findMany).toHaveBeenCalled();
+    });
+
+    it('should allow member to submit standalone deposit request', async () => {
+      mockPrismaService.deposit.create.mockResolvedValueOnce({
+        id: 'dep_new',
+        amount: 2000,
+        status: 'PENDING_APPROVAL',
+      });
+      mockPrismaService.user.findUnique.mockResolvedValueOnce({
+        id: 'manager_1',
+        name: 'Manager',
+      });
+
+      const res = await service.submitDepositRequest(
+        { amount: 2000, note: 'bKash TrxID #9X8' },
+        'user_1',
+      );
+
+      expect(res.message).toContain('pending manager approval');
+      expect(mockPrismaService.deposit.create).toHaveBeenCalledWith({
+        data: {
+          monthId: 'month_1',
+          userId: 'user_1',
+          amount: 2000,
+          status: 'PENDING_APPROVAL',
+        },
+      });
+      expect(mockQueue.add).toHaveBeenCalledWith('send-user-notification', {
+        userId: 'manager_1',
+        title: '💳 New Deposit Request',
+        body: expect.stringContaining('2000'),
+      });
+    });
+
+    it('should allow manager to approve standalone deposit', async () => {
+      mockPrismaService.deposit.findUniqueOrThrow.mockResolvedValueOnce({
+        id: 'dep_1',
+        userId: 'user_1',
+        amount: 2000,
+        status: 'PENDING_APPROVAL',
+        monthId: 'month_1',
+        month: { messId: 'mess_1' },
+      });
+      mockPrismaService.deposit.update.mockResolvedValueOnce({
+        id: 'dep_1',
+        status: 'APPROVED',
+      });
+
+      const res = await service.approveDeposit('dep_1', 'manager_1');
+      expect(res.status).toBe('APPROVED');
+      expect(mockPrismaService.deposit.update).toHaveBeenCalledWith({
+        where: { id: 'dep_1' },
+        data: { status: 'APPROVED' },
+      });
+      expect(mockQueue.add).toHaveBeenCalledWith('send-user-notification', {
+        userId: 'user_1',
+        title: '✅ Deposit Approved!',
+        body: expect.stringContaining('2000'),
+      });
+    });
+
+    it('should allow manager to reject standalone deposit', async () => {
+      mockPrismaService.deposit.findUniqueOrThrow.mockResolvedValueOnce({
+        id: 'dep_1',
+        userId: 'user_1',
+        amount: 2000,
+        status: 'PENDING_APPROVAL',
+        monthId: 'month_1',
+        month: { messId: 'mess_1' },
+      });
+      mockPrismaService.deposit.update.mockResolvedValueOnce({
+        id: 'dep_1',
+        status: 'REJECTED',
+      });
+
+      const res = await service.rejectDeposit('dep_1', 'manager_1');
+      expect(res.status).toBe('REJECTED');
+      expect(mockPrismaService.deposit.update).toHaveBeenCalledWith({
+        where: { id: 'dep_1' },
+        data: { status: 'REJECTED' },
+      });
+      expect(mockQueue.add).toHaveBeenCalledWith('send-user-notification', {
+        userId: 'user_1',
+        title: '❌ Deposit Rejected',
+        body: expect.stringContaining('2000'),
+      });
+    });
+
+    it('should complete purchase as manager and auto-increment monthly bazaar cost', async () => {
+      mockContextValidator.validateUserAndMess.mockResolvedValueOnce({
+        user: { id: 'mgr_1', name: 'Manager', role: Role.MANAGER },
+        mess: { id: 'mess_1' },
+      });
+      mockPrismaService.bazaarItem.findUnique.mockResolvedValueOnce({
+        id: 'item_1',
+        status: 'PENDING',
+        items: 'Chal 5kg',
+        monthId: 'month_1',
+        month: { messId: 'mess_1' },
+      });
+
+      const res = await service.completePurchase(
+        'item_1',
+        { cost: 350 },
+        'mgr_1',
+      );
+
+      expect(res.status).toBe('COMPLETED');
+      expect(mockPrismaService.monthlyData.update).toHaveBeenCalledWith({
+        where: { id: 'month_1' },
+        data: { totalBazaarCost: { increment: 350 } },
+      });
+    });
+
+    it('should set status to PENDING_APPROVAL and notify manager when member completes purchase', async () => {
+      mockContextValidator.validateUserAndMess.mockResolvedValueOnce({
+        user: { id: 'user_1', name: 'Member Rafi', role: Role.MEMBER },
+        mess: { id: 'mess_1', managerId: 'mgr_1' },
+      });
+      mockPrismaService.bazaarItem.findUnique.mockResolvedValueOnce({
+        id: 'item_1',
+        status: 'PENDING',
+        items: 'Dim 12 ta',
+        monthId: 'month_1',
+        month: { messId: 'mess_1' },
+      });
+      mockPrismaService.user.findUnique.mockResolvedValueOnce({
+        id: 'mgr_1',
+      });
+
+      const res = await service.completePurchase(
+        'item_1',
+        { cost: 150 },
+        'user_1',
+      );
+
+      expect(res.status).toBe('PENDING_APPROVAL');
+      expect(mockQueue.add).toHaveBeenCalledWith('send-user-notification', {
+        userId: 'mgr_1',
+        title: '🔔 Bazaar Purchase Pending Approval',
+        body: expect.stringContaining('150'),
+      });
+    });
+
+    it('should allow deleting unpurchased pending bazaar item', async () => {
+      mockContextValidator.validateUserAndMess.mockResolvedValueOnce({
+        user: { id: 'user_1' },
+        mess: { id: 'mess_1' },
+      });
+      mockPrismaService.bazaarItem.findUnique.mockResolvedValueOnce({
+        id: 'item_pending',
+        status: 'PENDING',
+        monthId: 'month_1',
+        month: { messId: 'mess_1' },
+      });
+
+      const res = await service.deleteBazaarItem('item_pending', 'user_1');
+      expect(res.message).toBe('Bazaar item deleted successfully');
+      expect(mockPrismaService.bazaarItem.delete).toHaveBeenCalledWith({
+        where: { id: 'item_pending' },
       });
     });
   });

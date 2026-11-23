@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsNumber, IsUUID, Min } from 'class-validator';
+import { IsNotEmpty, IsNumber, IsPositive, IsUUID } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class CreateDepositDto {
@@ -9,6 +9,6 @@ export class CreateDepositDto {
 
   @ApiProperty({ example: 2000, description: 'Deposit amount in Taka' })
   @IsNumber()
-  @Min(0)
+  @IsPositive({ message: 'Deposit amount must be greater than 0' })
   amount: number;
 }

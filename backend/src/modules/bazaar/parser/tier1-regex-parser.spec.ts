@@ -102,4 +102,27 @@ describe('Tier1RegexParser (Unit Tests)', () => {
       expect(res.items[0].name).toBe('Shorishar Tel (সরিষার তেল)');
     });
   });
+
+  describe('Member Deposits and Anti-False Item Match', () => {
+    it('should parse shopper deposit and contributor deposit without creating bogus food items', async () => {
+      const res = await parser.parse(
+        'ami disi 2000\nkorim dise 500\nalu 2kg 80',
+      );
+
+      // Shopper deposit
+      expect(res.depositAmount).toBe(2000);
+
+      // Contributor deposit
+      expect(res.memberDeposits).toBeDefined();
+      expect(res.memberDeposits).toHaveLength(1);
+      expect(res.memberDeposits![0].memberName).toBe('korim');
+      expect(res.memberDeposits![0].amount).toBe(500);
+
+      // Real grocery items: ONLY Alu
+      expect(res.items).toHaveLength(1);
+      expect(res.items[0].name).toContain('Alu');
+      expect(res.items[0].cost).toBe(80);
+      expect(res.totalCost).toBe(80);
+    });
+  });
 });

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -16,6 +17,7 @@ import { CreateDepositDto } from './dto/create-deposit.dto';
 import { SmartParseDto } from './dto/smart-parse.dto';
 import { SmartSubmitDto } from './dto/smart-submit.dto';
 import { RejectBazaarDto } from './dto/reject-bazaar.dto';
+import { SubmitDepositRequestDto } from './dto/submit-deposit-request.dto';
 import { SmartBazaarParserService } from './parser/smart-bazaar-parser.service';
 import { FuzzyNormalizer } from './parser/fuzzy-normalizer';
 import { PatternMemoryService } from './parser/pattern-memory.service';
@@ -86,16 +88,42 @@ export class BazaarService {
     let messMembers: { id: string; name: string }[] = [];
 
     if (userId) {
+      // ⚡ FAST 1-QUERY FETCH: ইউজার, মেস এবং মেম্বার লিস্ট একবারে নেস্টেড রিলেশনে নিয়ে আসা
       const user = await this.prisma.user.findUnique({
         where: { id: userId },
-        select: { messId: true },
+        select: {
+          messId: true,
+          mess: {
+            select: {
+              id: true,
+              managerId: true,
+              members: {
+                select: { id: true, name: true },
+              },
+            },
+          },
+        },
       });
-      messId = user?.messId || undefined;
-      if (messId) {
-        const mess = await this.prisma.mess.findUnique({
-          where: { id: messId },
-          select: { managerId: true },
-        });
+
+      if (user?.mess) {
+        messId = user.mess.id;
+        messMembers = user.mess.members || [];
+        const manager = messMembers.find((m) => m.id === user.mess?.managerId);
+        managerName = manager?.name;
+      } else if (user?.messId) {
+        // Fallback for mocks / detached states
+        messId = user.messId;
+        const [mess, members] = await Promise.all([
+          this.prisma.mess.findUnique({
+            where: { id: messId },
+            select: { managerId: true },
+          }),
+          this.prisma.user.findMany({
+            where: { messId },
+            select: { id: true, name: true },
+          }),
+        ]);
+        messMembers = members;
         if (mess?.managerId) {
           const manager = await this.prisma.user.findUnique({
             where: { id: mess.managerId },
@@ -103,10 +131,6 @@ export class BazaarService {
           });
           managerName = manager?.name;
         }
-        messMembers = await this.prisma.user.findMany({
-          where: { messId },
-          select: { id: true, name: true },
-        });
       }
     }
 
@@ -212,6 +236,9 @@ export class BazaarService {
           select: { id: true, name: true },
         });
 
+        // 🔒 MULTI-TENANT VERIFICATION: মেসের বৈধ মেম্বারদের সেট তৈরি
+        const validMemberIdSet = new Set(messMembers.map((m) => m.id));
+
         for (const md of dto.memberDeposits!) {
           if (!md.amount || md.amount === 0) continue;
           let targetUserId: string = md.userId || '';
@@ -223,6 +250,11 @@ export class BazaarService {
             'nijer',
             'ami (shopper)',
           ].some((k) => clean.includes(k));
+
+          // 🔒 প্রেরিত userId টি অন্য কোনো মেসের হলে তা বাতিল করা
+          if (targetUserId && !validMemberIdSet.has(targetUserId)) {
+            targetUserId = '';
+          }
 
           if (!targetUserId) {
             if (isShopper) {
@@ -320,22 +352,28 @@ export class BazaarService {
 
     // 🧠 ৪. Supervised Human Feedback (ইউজার যদি কোনো আইটেমের নাম নিজে এডিট করে থাকে)
     if (this.patternMemory && dto.items && dto.items.length > 0) {
-      for (const item of dto.items) {
-        if (
-          item.originalName &&
-          item.name &&
-          item.originalName.toLowerCase().trim() !==
-            item.name.toLowerCase().trim()
-        ) {
-          // ইউজার নিজেই নাম সংশোধন করেছে, তাই কনফিডেন্স ১.০ দিয়ে মুখস্থ করবে
-          await this.patternMemory.learnPattern(
-            item.originalName,
+      const learningPromises = dto.items
+        .filter(
+          (item) =>
+            item.originalName &&
+            item.name &&
+            item.originalName.toLowerCase().trim() !==
+              item.name.toLowerCase().trim(),
+        )
+        .map((item) =>
+          this.patternMemory!.learnPattern(
+            item.originalName!,
             item.name,
             item.unit || 'kg',
             mess.id,
             'USER_MANUAL_CORRECTION',
-          );
-        }
+          ).catch((err) => {
+            this.logger.warn(`Failed to learn pattern asynchronously: ${err}`);
+          }),
+        );
+
+      if (learningPromises.length > 0) {
+        Promise.allSettled(learningPromises).catch(() => {});
       }
     }
 
@@ -359,9 +397,18 @@ export class BazaarService {
 
     const item = await this.prisma.bazaarItem.findUnique({
       where: { id: itemId },
+      include: { month: true },
     });
 
     if (!item) throw new NotFoundException('Bazaar item not found');
+
+    // 🔒 MULTI-TENANT VERIFICATION: আইটেমটি এই ম্যানেজারের মেসের কিনা নিশ্চিত করা
+    if (item.month?.messId !== mess.id) {
+      throw new ForbiddenException(
+        'Access denied: You cannot approve bazaar items from another mess',
+      );
+    }
+
     if (item.status !== 'PENDING_APPROVAL') {
       throw new BadRequestException(
         `Item is not pending approval (Current status: ${item.status})`,
@@ -386,20 +433,24 @@ export class BazaarService {
         data: { status: 'APPROVED' },
       });
 
+      // ⚡ ৩. ফিন্যান্সিয়াল সিঙ্ক: অনুমোদিত বাজারের টাকা মাসিক মোট খরচে যুক্ত করা
+      await tx.monthlyData.update({
+        where: { id: item.monthId },
+        data: { totalBazaarCost: { increment: item.cost } },
+      });
+
       return approvedItem;
     });
 
-    // ক্যাশ ইনভ্যালিডেশন
-    if (mess.currentMonthId) {
-      this.eventEmitter.emit(CacheEvents.BAZAAR_UPDATED, {
-        messId: mess.id,
-        monthId: mess.currentMonthId,
-      });
-      this.eventEmitter.emit(CacheEvents.BILLING_UPDATED, {
-        messId: mess.id,
-        monthId: mess.currentMonthId,
-      });
-    }
+    // ক্যাশ ইনভ্যালিডেশন (সরাসরি item.monthId টার্গেট করা)
+    this.eventEmitter.emit(CacheEvents.BAZAAR_UPDATED, {
+      messId: mess.id,
+      monthId: item.monthId,
+    });
+    this.eventEmitter.emit(CacheEvents.BILLING_UPDATED, {
+      messId: mess.id,
+      monthId: item.monthId,
+    });
 
     // ক্রেতাকে কনফার্মেশন নোটিফিকেশন পাঠানো
     if (item.shopperId) {
@@ -417,14 +468,23 @@ export class BazaarService {
   // ৪. REJECT BAZAAR & DEPOSIT (MANAGER ONLY)
   // -------------------------------------------------------------
   async rejectBazaar(itemId: string, dto: RejectBazaarDto, managerId: string) {
-    const { manager: _manager, mess: _mess } =
+    const { manager: _manager, mess } =
       await this.validator.validateManager(managerId);
 
     const item = await this.prisma.bazaarItem.findUnique({
       where: { id: itemId },
+      include: { month: true },
     });
 
     if (!item) throw new NotFoundException('Bazaar item not found');
+
+    // 🔒 MULTI-TENANT VERIFICATION: আইটেমটি এই ম্যানেজারের মেসের কিনা নিশ্চিত করা
+    if (item.month?.messId !== mess.id) {
+      throw new ForbiddenException(
+        'Access denied: You cannot reject bazaar items from another mess',
+      );
+    }
+
     if (item.status !== 'PENDING_APPROVAL') {
       throw new BadRequestException(
         `Item is not pending approval (Current status: ${item.status})`,
@@ -451,6 +511,12 @@ export class BazaarService {
       });
 
       return rejectedItem;
+    });
+
+    // ⚡ ক্যাশ ইনভ্যালিডেশন: রিজেক্ট হলেও ক্যাশ ক্লিয়ার করা যাতে ফ্রন্টএন্ডে পেন্ডিং আইটেম না থাকে
+    this.eventEmitter.emit(CacheEvents.BAZAAR_UPDATED, {
+      messId: mess.id,
+      monthId: item.monthId,
     });
 
     // ক্রেতাকে নোটিফিকেশন দিয়ে কারণ জানানো
@@ -502,30 +568,104 @@ export class BazaarService {
     const { user, mess } = await this.validator.validateUserAndMess(userId);
     const item = await this.prisma.bazaarItem.findUnique({
       where: { id: itemId },
+      include: { month: true },
     });
 
     if (!item) throw new NotFoundException('Bazaar item not found');
+
+    // 🔒 MULTI-TENANT VERIFICATION
+    if (item.month?.messId !== mess.id) {
+      throw new ForbiddenException(
+        'Access denied: You cannot complete purchases for another mess',
+      );
+    }
+
     if (item.status === 'COMPLETED')
       throw new BadRequestException('Purchase already completed');
 
-    const updatedItem = await this.prisma.bazaarItem.update({
-      where: { id: itemId },
-      data: {
-        cost: dto.cost,
-        status: 'COMPLETED',
-        shopperId: userId,
-        shopperName: user.name,
-      },
+    const isManager = user.role === Role.MANAGER;
+
+    const updatedItem = await this.prisma.$transaction(async (tx) => {
+      const completed = await tx.bazaarItem.update({
+        where: { id: itemId },
+        data: {
+          cost: dto.cost,
+          status: isManager ? 'COMPLETED' : 'PENDING_APPROVAL',
+          shopperId: userId,
+          shopperName: user.name,
+        },
+      });
+
+      // ⚡ ফিন্যান্সিয়াল সিঙ্ক: শুধুমাত্র ম্যানেজার সরাসরি অনুমোদন দিলে মাসিক খরচে যোগ হবে
+      if (isManager) {
+        await tx.monthlyData.update({
+          where: { id: item.monthId },
+          data: { totalBazaarCost: { increment: dto.cost } },
+        });
+      }
+
+      return completed;
     });
 
-    if (mess.currentMonthId) {
-      this.eventEmitter.emit(CacheEvents.BAZAAR_UPDATED, {
+    // ⚡ ক্যাশ ইনভ্যালিডেশন
+    this.eventEmitter.emit(CacheEvents.BAZAAR_UPDATED, {
+      messId: mess.id,
+      monthId: item.monthId,
+    });
+    if (isManager) {
+      this.eventEmitter.emit(CacheEvents.BILLING_UPDATED, {
         messId: mess.id,
-        monthId: mess.currentMonthId,
+        monthId: item.monthId,
       });
+    } else {
+      // মেম্বার সাবমিট করায় ম্যানেজারকে রিভিউ এর নোটিফিকেশন পাঠানো
+      const manager = await this.prisma.user.findUnique({
+        where: { id: mess.managerId },
+      });
+      if (manager) {
+        await this.notificationQueue.add('send-user-notification', {
+          userId: manager.id,
+          title: '🔔 Bazaar Purchase Pending Approval',
+          body: `${user.name} logged purchase of "${item.items}" (BDT ${dto.cost}) awaiting your approval.`,
+        });
+      }
     }
 
     return updatedItem;
+  }
+
+  // শপিং লিস্ট থেকে অপ্রয়োজনীয়/ভুল পেন্ডিং আইটেম মুছে ফেলা
+  async deleteBazaarItem(itemId: string, userId: string) {
+    const { mess } = await this.validator.validateUserAndMess(userId);
+    const item = await this.prisma.bazaarItem.findUnique({
+      where: { id: itemId },
+      include: { month: true },
+    });
+
+    if (!item) throw new NotFoundException('Bazaar item not found');
+
+    if (item.month?.messId !== mess.id) {
+      throw new ForbiddenException(
+        'Access denied: You cannot delete items from another mess',
+      );
+    }
+
+    if (item.status !== 'PENDING') {
+      throw new BadRequestException(
+        `Cannot delete item with status "${item.status}". Only unpurchased pending items can be removed.`,
+      );
+    }
+
+    await this.prisma.bazaarItem.delete({
+      where: { id: itemId },
+    });
+
+    this.eventEmitter.emit(CacheEvents.BAZAAR_UPDATED, {
+      messId: mess.id,
+      monthId: item.monthId,
+    });
+
+    return { message: 'Bazaar item deleted successfully' };
   }
 
   async getBazaarList(userId: string) {
@@ -580,5 +720,135 @@ export class BazaarService {
     });
 
     return deposit;
+  }
+
+  // মেম্বার সরাসরি বিকাশ/নগদ/ক্যাশ জমার রিকোয়েস্ট সাবমিট করা
+  async submitDepositRequest(dto: SubmitDepositRequestDto, userId: string) {
+    const { user, mess, activeMonthId } =
+      await this.validator.validateUserMessAndActiveMonth(userId);
+
+    const deposit = await this.prisma.deposit.create({
+      data: {
+        monthId: activeMonthId,
+        userId,
+        amount: dto.amount,
+        status: 'PENDING_APPROVAL',
+      },
+    });
+
+    const manager = await this.prisma.user.findUnique({
+      where: { id: mess.managerId },
+    });
+
+    if (manager) {
+      await this.notificationQueue.add('send-user-notification', {
+        userId: manager.id,
+        title: '💳 New Deposit Request',
+        body: `${user.name} submitted a deposit of BDT ${dto.amount}${dto.note ? ` (${dto.note})` : ''} awaiting approval.`,
+      });
+    }
+
+    return {
+      message: 'Deposit request submitted and pending manager approval',
+      deposit,
+    };
+  }
+
+  // ম্যানেজার কর্তৃক সরাসরি মেম্বার ডিপোজিট অ্যাপ্রুভ করা
+  async approveDeposit(depositId: string, managerId: string) {
+    const { mess } = await this.validator.validateManager(managerId);
+
+    const deposit = await this.prisma.deposit.findUniqueOrThrow({
+      where: { id: depositId },
+      include: { month: true },
+    });
+
+    if (deposit.month?.messId !== mess.id) {
+      throw new ForbiddenException(
+        'Access denied: Deposit belongs to another mess',
+      );
+    }
+
+    if (deposit.status !== 'PENDING_APPROVAL') {
+      throw new BadRequestException(
+        `Deposit is not pending approval (Current status: ${deposit.status})`,
+      );
+    }
+
+    const updated = await this.prisma.deposit.update({
+      where: { id: depositId },
+      data: { status: 'APPROVED' },
+    });
+
+    this.eventEmitter.emit(CacheEvents.BILLING_UPDATED, {
+      messId: mess.id,
+      monthId: deposit.monthId,
+    });
+
+    await this.notificationQueue.add('send-user-notification', {
+      userId: deposit.userId,
+      title: '✅ Deposit Approved!',
+      body: `Manager approved your deposit of BDT ${deposit.amount}.`,
+    });
+
+    return updated;
+  }
+
+  // ম্যানেজার কর্তৃক সরাসরি মেম্বার ডিপোজিট রিজেক্ট করা
+  async rejectDeposit(depositId: string, managerId: string) {
+    const { mess } = await this.validator.validateManager(managerId);
+
+    const deposit = await this.prisma.deposit.findUniqueOrThrow({
+      where: { id: depositId },
+      include: { month: true },
+    });
+
+    if (deposit.month?.messId !== mess.id) {
+      throw new ForbiddenException(
+        'Access denied: Deposit belongs to another mess',
+      );
+    }
+
+    if (deposit.status !== 'PENDING_APPROVAL') {
+      throw new BadRequestException(
+        `Deposit is not pending approval (Current status: ${deposit.status})`,
+      );
+    }
+
+    const updated = await this.prisma.deposit.update({
+      where: { id: depositId },
+      data: { status: 'REJECTED' },
+    });
+
+    this.eventEmitter.emit(CacheEvents.BILLING_UPDATED, {
+      messId: mess.id,
+      monthId: deposit.monthId,
+    });
+
+    await this.notificationQueue.add('send-user-notification', {
+      userId: deposit.userId,
+      title: '❌ Deposit Rejected',
+      body: `Manager rejected your deposit of BDT ${deposit.amount}.`,
+    });
+
+    return updated;
+  }
+
+  async getDeposits(userId: string) {
+    const { mess } = await this.validator.validateUserAndMess(userId);
+    if (!mess.currentMonthId) return [];
+
+    const monthId = mess.currentMonthId;
+    const cacheKey = CacheKeys.bazaarDeposits(mess.id, monthId);
+
+    return this.appCache.remember(cacheKey, 60, () =>
+      this.prisma.deposit.findMany({
+        where: { monthId },
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+    );
   }
 }
