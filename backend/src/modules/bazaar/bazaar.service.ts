@@ -19,8 +19,9 @@ import { SmartSubmitDto } from './dto/smart-submit.dto';
 import { RejectBazaarDto } from './dto/reject-bazaar.dto';
 import { SubmitDepositRequestDto } from './dto/submit-deposit-request.dto';
 import { SmartBazaarParserService } from './parser/smart-bazaar-parser.service';
-import { FuzzyNormalizer } from './parser/fuzzy-normalizer';
 import { PatternMemoryService } from './parser/pattern-memory.service';
+import { MemberResolverUtil } from './utils/member-resolver.util';
+import { DepositsService } from './deposits.service';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { AppCacheService } from '../../common/cache/app-cache.service';
 import { CacheKeys } from '../../common/cache/cache-keys';
@@ -38,50 +39,12 @@ export class BazaarService {
     @InjectQueue('notification-queue') private notificationQueue: Queue,
     private smartParser: SmartBazaarParserService,
     @Optional() private patternMemory?: PatternMemoryService,
+    @Optional() private depositsService?: DepositsService,
   ) {}
 
   // -------------------------------------------------------------
   // ১. SMART NOTEPAD PARSE (PREVIEW ONLY)
   // -------------------------------------------------------------
-  private resolveMember(
-    name: string,
-    members: { id: string; name: string }[],
-  ): { id: string; name: string } | null {
-    if (!name || members.length === 0) return null;
-    const cleanName = name.toLowerCase().trim();
-
-    // 1. Exact match
-    const exact = members.find(
-      (m) => m.name.toLowerCase().trim() === cleanName,
-    );
-    if (exact) return exact;
-
-    // 2. Substring match
-    const substringMatch = members.find(
-      (m) =>
-        m.name.toLowerCase().includes(cleanName) ||
-        cleanName.includes(m.name.toLowerCase()),
-    );
-    if (substringMatch) return substringMatch;
-
-    // 3. Fuzzy Levenshtein Distance (allowing up to 2 typos)
-    let bestMatch: { id: string; name: string } | null = null;
-    let minDistance = 3;
-
-    for (const m of members) {
-      const dist = FuzzyNormalizer.levenshteinDistance(
-        cleanName,
-        m.name.toLowerCase().trim(),
-      );
-      if (dist < minDistance) {
-        minDistance = dist;
-        bestMatch = m;
-      }
-    }
-
-    return bestMatch;
-  }
-
   async smartParse(dto: SmartParseDto, userId?: string) {
     let messId: string | undefined;
     let managerName: string | undefined;
@@ -158,7 +121,10 @@ export class BazaarService {
           };
         }
         if (messMembers.length > 0) {
-          const matched = this.resolveMember(md.memberName, messMembers);
+          const matched = MemberResolverUtil.resolveMember(
+            md.memberName,
+            messMembers,
+          );
           return {
             ...md,
             userId: matched?.id,
@@ -260,7 +226,10 @@ export class BazaarService {
             if (isShopper) {
               targetUserId = userId;
             } else {
-              const matched = this.resolveMember(md.memberName, messMembers);
+              const matched = MemberResolverUtil.resolveMember(
+                md.memberName,
+                messMembers,
+              );
               targetUserId = matched ? matched.id : userId;
             }
           }
@@ -683,172 +652,41 @@ export class BazaarService {
     );
   }
 
+  // -------------------------------------------------------------
+  // ৬. DEPOSIT METHODS (DELEGATED TO DepositsService)
+  // -------------------------------------------------------------
   async addDeposit(dto: CreateDepositDto, managerId: string) {
-    const { manager, mess } = await this.validator.validateManager(managerId);
-
-    if (!mess.isMonthActive || !mess.currentMonthId) {
-      throw new BadRequestException(
-        'Active month summary session is not started',
-      );
+    if (this.depositsService) {
+      return this.depositsService.addDeposit(dto, managerId);
     }
-
-    const targetUser = await this.prisma.user.findUnique({
-      where: { id: dto.userId },
-    });
-    if (!targetUser || targetUser.messId !== manager.messId) {
-      throw new BadRequestException('User not found in your mess');
-    }
-
-    const deposit = await this.prisma.deposit.create({
-      data: {
-        monthId: mess.currentMonthId,
-        userId: dto.userId,
-        amount: dto.amount,
-        status: 'APPROVED',
-      },
-    });
-
-    this.eventEmitter.emit(CacheEvents.BILLING_UPDATED, {
-      messId: mess.id,
-      monthId: mess.currentMonthId,
-    });
-
-    await this.notificationQueue.add('send-user-notification', {
-      userId: dto.userId,
-      title: '💳 Deposit Logged!',
-      body: `Manager logged a deposit of BDT ${dto.amount} for you.`,
-    });
-
-    return deposit;
+    throw new BadRequestException('DepositsService is not available');
   }
 
-  // মেম্বার সরাসরি বিকাশ/নগদ/ক্যাশ জমার রিকোয়েস্ট সাবমিট করা
   async submitDepositRequest(dto: SubmitDepositRequestDto, userId: string) {
-    const { user, mess, activeMonthId } =
-      await this.validator.validateUserMessAndActiveMonth(userId);
-
-    const deposit = await this.prisma.deposit.create({
-      data: {
-        monthId: activeMonthId,
-        userId,
-        amount: dto.amount,
-        status: 'PENDING_APPROVAL',
-      },
-    });
-
-    const manager = await this.prisma.user.findUnique({
-      where: { id: mess.managerId },
-    });
-
-    if (manager) {
-      await this.notificationQueue.add('send-user-notification', {
-        userId: manager.id,
-        title: '💳 New Deposit Request',
-        body: `${user.name} submitted a deposit of BDT ${dto.amount}${dto.note ? ` (${dto.note})` : ''} awaiting approval.`,
-      });
+    if (this.depositsService) {
+      return this.depositsService.submitDepositRequest(dto, userId);
     }
-
-    return {
-      message: 'Deposit request submitted and pending manager approval',
-      deposit,
-    };
+    throw new BadRequestException('DepositsService is not available');
   }
 
-  // ম্যানেজার কর্তৃক সরাসরি মেম্বার ডিপোজিট অ্যাপ্রুভ করা
   async approveDeposit(depositId: string, managerId: string) {
-    const { mess } = await this.validator.validateManager(managerId);
-
-    const deposit = await this.prisma.deposit.findUniqueOrThrow({
-      where: { id: depositId },
-      include: { month: true },
-    });
-
-    if (deposit.month?.messId !== mess.id) {
-      throw new ForbiddenException(
-        'Access denied: Deposit belongs to another mess',
-      );
+    if (this.depositsService) {
+      return this.depositsService.approveDeposit(depositId, managerId);
     }
-
-    if (deposit.status !== 'PENDING_APPROVAL') {
-      throw new BadRequestException(
-        `Deposit is not pending approval (Current status: ${deposit.status})`,
-      );
-    }
-
-    const updated = await this.prisma.deposit.update({
-      where: { id: depositId },
-      data: { status: 'APPROVED' },
-    });
-
-    this.eventEmitter.emit(CacheEvents.BILLING_UPDATED, {
-      messId: mess.id,
-      monthId: deposit.monthId,
-    });
-
-    await this.notificationQueue.add('send-user-notification', {
-      userId: deposit.userId,
-      title: '✅ Deposit Approved!',
-      body: `Manager approved your deposit of BDT ${deposit.amount}.`,
-    });
-
-    return updated;
+    throw new BadRequestException('DepositsService is not available');
   }
 
-  // ম্যানেজার কর্তৃক সরাসরি মেম্বার ডিপোজিট রিজেক্ট করা
   async rejectDeposit(depositId: string, managerId: string) {
-    const { mess } = await this.validator.validateManager(managerId);
-
-    const deposit = await this.prisma.deposit.findUniqueOrThrow({
-      where: { id: depositId },
-      include: { month: true },
-    });
-
-    if (deposit.month?.messId !== mess.id) {
-      throw new ForbiddenException(
-        'Access denied: Deposit belongs to another mess',
-      );
+    if (this.depositsService) {
+      return this.depositsService.rejectDeposit(depositId, managerId);
     }
-
-    if (deposit.status !== 'PENDING_APPROVAL') {
-      throw new BadRequestException(
-        `Deposit is not pending approval (Current status: ${deposit.status})`,
-      );
-    }
-
-    const updated = await this.prisma.deposit.update({
-      where: { id: depositId },
-      data: { status: 'REJECTED' },
-    });
-
-    this.eventEmitter.emit(CacheEvents.BILLING_UPDATED, {
-      messId: mess.id,
-      monthId: deposit.monthId,
-    });
-
-    await this.notificationQueue.add('send-user-notification', {
-      userId: deposit.userId,
-      title: '❌ Deposit Rejected',
-      body: `Manager rejected your deposit of BDT ${deposit.amount}.`,
-    });
-
-    return updated;
+    throw new BadRequestException('DepositsService is not available');
   }
 
   async getDeposits(userId: string) {
-    const { mess } = await this.validator.validateUserAndMess(userId);
-    if (!mess.currentMonthId) return [];
-
-    const monthId = mess.currentMonthId;
-    const cacheKey = CacheKeys.bazaarDeposits(mess.id, monthId);
-
-    return this.appCache.remember(cacheKey, 60, () =>
-      this.prisma.deposit.findMany({
-        where: { monthId },
-        include: {
-          user: { select: { id: true, name: true, email: true } },
-        },
-        orderBy: { createdAt: 'desc' },
-      }),
-    );
+    if (this.depositsService) {
+      return this.depositsService.getDeposits(userId);
+    }
+    return [];
   }
 }

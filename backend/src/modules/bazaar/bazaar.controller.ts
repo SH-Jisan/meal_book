@@ -20,6 +20,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Role } from '@prisma/client';
 import { BazaarService } from './bazaar.service';
+import { DepositsService } from './deposits.service';
 import { CompletePurchaseDto } from './dto/complete-purchase.dto';
 import { CreateBazaarItemDto } from './dto/create-bazaar-item.dto';
 import { CreateDepositDto } from './dto/create-deposit.dto';
@@ -33,7 +34,10 @@ import { SubmitDepositRequestDto } from './dto/submit-deposit-request.dto';
 @UseGuards(JwtAuthGuard)
 @Controller('bazaar')
 export class BazaarController {
-  constructor(private readonly bazaarService: BazaarService) {}
+  constructor(
+    private readonly bazaarService: BazaarService,
+    private readonly depositsService: DepositsService,
+  ) {}
 
   // -------------------------------------------------------------
   // ১. SMART NOTEPAD PREVIEW
@@ -148,6 +152,9 @@ export class BazaarController {
     return this.bazaarService.deleteBazaarItem(itemId, user.id);
   }
 
+  // -------------------------------------------------------------
+  // ৬. DEPOSIT ENDPOINTS (DELEGATED TO DepositsService)
+  // -------------------------------------------------------------
   @Post('deposit')
   @UseGuards(RolesGuard)
   @Roles(Role.MANAGER)
@@ -157,14 +164,14 @@ export class BazaarController {
     @Body() dto: CreateDepositDto,
     @CurrentUser() user: { id: string },
   ) {
-    return this.bazaarService.addDeposit(dto, user.id);
+    return this.depositsService.addDeposit(dto, user.id);
   }
 
   @Get('deposits')
   @ApiOperation({ summary: 'Get current month member deposits list' })
   @ApiResponse({ status: 200, description: 'Deposits list returned.' })
   getDeposits(@CurrentUser() user: { id: string }) {
-    return this.bazaarService.getDeposits(user.id);
+    return this.depositsService.getDeposits(user.id);
   }
 
   @Post('deposit-request')
@@ -180,7 +187,7 @@ export class BazaarController {
     @Body() dto: SubmitDepositRequestDto,
     @CurrentUser() user: { id: string },
   ) {
-    return this.bazaarService.submitDepositRequest(dto, user.id);
+    return this.depositsService.submitDepositRequest(dto, user.id);
   }
 
   @Patch('deposit/:id/approve')
@@ -198,7 +205,7 @@ export class BazaarController {
     @Param('id') depositId: string,
     @CurrentUser() user: { id: string },
   ) {
-    return this.bazaarService.approveDeposit(depositId, user.id);
+    return this.depositsService.approveDeposit(depositId, user.id);
   }
 
   @Patch('deposit/:id/reject')
@@ -216,6 +223,6 @@ export class BazaarController {
     @Param('id') depositId: string,
     @CurrentUser() user: { id: string },
   ) {
-    return this.bazaarService.rejectDeposit(depositId, user.id);
+    return this.depositsService.rejectDeposit(depositId, user.id);
   }
 }
