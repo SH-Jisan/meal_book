@@ -1,14 +1,14 @@
 import { BadRequestException } from '@nestjs/common';
 import { AppCacheService } from '../../common/cache/app-cache.service';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { getQueueToken } from '@nestjs/bullmq';
 import { Test, TestingModule } from '@nestjs/testing';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { ContextValidatorService } from '../../common/services/context-validator.service';
 import { MealsService } from './meals.service';
+import { MealRequestsService } from './meal-requests.service';
 import { MealType, RequestCategory } from './dto/update-meal.dto';
-import { MealStatus, RequestStatus } from '@prisma/client';
+import { MealStatus } from '@prisma/client';
 
 describe('MealsService (Unit Tests)', () => {
   let service: MealsService;
@@ -30,23 +30,6 @@ describe('MealsService (Unit Tests)', () => {
     user: {
       count: jest.fn().mockResolvedValue(5),
     },
-    mealRequest: {
-      create: jest.fn().mockResolvedValue({ id: 'req_1', status: 'PENDING' }),
-      findFirst: jest.fn().mockResolvedValue(null),
-      findUniqueOrThrow: jest.fn().mockResolvedValue({
-        id: 'req_1',
-        status: RequestStatus.PENDING,
-        type: 'LUNCH',
-        category: 'OFF',
-        count: 1,
-        userId: 'user_1',
-        logId: '2026-07-23',
-        user: { messId: 'mess_1' },
-      }),
-      update: jest.fn().mockResolvedValue({ id: 'req_1' }),
-      delete: jest.fn().mockResolvedValue({ id: 'req_1' }),
-    },
-    $transaction: jest.fn((callback) => callback(mockPrismaService)),
   };
 
   const mockContextValidator = {
@@ -65,222 +48,157 @@ describe('MealsService (Unit Tests)', () => {
       },
     }),
     validateManager: jest.fn().mockResolvedValue({
-      manager: { id: 'mgr_1', messId: 'mess_1', name: 'Manager' },
-      mess: {
-        id: 'mess_1',
-        currentMonthId: 'month_1',
-        lunchEndTime: '23:59',
-        dinnerEndTime: '23:59',
-      },
+      manager: { id: 'mgr_1', messId: 'mess_1' },
+      mess: { id: 'mess_1', currentMonthId: 'month_1' },
     }),
   };
 
-  const mockCacheManager = {
-    get: jest.fn().mockResolvedValue(null),
-    set: jest.fn().mockResolvedValue(undefined),
+  const mockQueue = {
+    add: jest.fn().mockResolvedValue({}),
+  };
+
+  const mockEventEmitter = {
+    emit: jest.fn(),
+  };
+
+  const mockAppCache = {
+    remember: jest.fn((key, ttl, cb) => cb()),
     del: jest.fn().mockResolvedValue(undefined),
   };
 
-  const mockQueue = {
-    add: jest.fn().mockResolvedValue(undefined),
+  const mockMealRequestsService = {
+    requestMealUpdate: jest.fn().mockResolvedValue({ id: 'req_1' }),
+    approveRequest: jest
+      .fn()
+      .mockResolvedValue({ message: 'Request approved successfully' }),
+    rejectRequest: jest
+      .fn()
+      .mockResolvedValue({ message: 'Request rejected successfully' }),
+    getPendingRequests: jest.fn().mockResolvedValue([]),
+    cancelMealRequest: jest
+      .fn()
+      .mockResolvedValue({ message: 'Meal request cancelled successfully' }),
   };
 
   beforeEach(async () => {
+    jest.clearAllMocks();
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         MealsService,
         { provide: PrismaService, useValue: mockPrismaService },
         { provide: ContextValidatorService, useValue: mockContextValidator },
-        { provide: CACHE_MANAGER, useValue: mockCacheManager },
+        { provide: AppCacheService, useValue: mockAppCache },
+        { provide: EventEmitter2, useValue: mockEventEmitter },
         { provide: getQueueToken('notification-queue'), useValue: mockQueue },
-        {
-          provide: AppCacheService,
-          useValue: {
-            remember: jest.fn((k, ttl, fn) => fn()),
-            del: jest.fn(),
-            delMany: jest.fn(),
-          },
-        },
-        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        { provide: MealRequestsService, useValue: mockMealRequestsService },
       ],
     }).compile();
 
     service = module.get<MealsService>(MealsService);
-    jest.clearAllMocks();
   });
 
-  it('should submit meal request successfully', async () => {
-    const result = await service.requestMealUpdate(
-      { type: MealType.LUNCH, category: RequestCategory.OFF, count: 1 },
-      'user_1',
-    );
-
-    expect(result).toHaveProperty('id', 'req_1');
-    expect(result).toHaveProperty('status', 'PENDING');
-    expect(mockPrismaService.dailyLog.upsert).toHaveBeenCalled();
-  });
-
-  it('should reject request when deadline has passed in Asia/Dhaka time', async () => {
-    mockContextValidator.validateUserMessAndActiveMonth.mockResolvedValueOnce({
-      user: { id: 'user_1' },
-      mess: { id: 'mess_1', lunchEndTime: '00:00' }, // 00:00 is passed at any hour > 0
-      activeMonthId: 'month_1',
-    });
-
-    await expect(
-      service.requestMealUpdate(
+  describe('Delegation to MealRequestsService', () => {
+    it('should delegate requestMealUpdate', async () => {
+      const res = await service.requestMealUpdate(
         { type: MealType.LUNCH, category: RequestCategory.OFF, count: 1 },
         'user_1',
-      ),
-    ).rejects.toThrow(BadRequestException);
-  });
-
-  it('should reject OFF request if count is greater than 1', async () => {
-    await expect(
-      service.requestMealUpdate(
-        { type: MealType.LUNCH, category: RequestCategory.OFF, count: 2 },
-        'user_1',
-      ),
-    ).rejects.toThrow(
-      new BadRequestException('For turning meal OFF, count must be exactly 1.'),
-    );
-  });
-
-  it('should reject OFF request if duplicate active request exists for same day and meal', async () => {
-    mockPrismaService.mealRequest.findFirst.mockResolvedValueOnce({
-      id: 'existing_req',
+      );
+      expect(res).toHaveProperty('id', 'req_1');
+      expect(mockMealRequestsService.requestMealUpdate).toHaveBeenCalled();
     });
 
-    await expect(
-      service.requestMealUpdate(
-        { type: MealType.LUNCH, category: RequestCategory.OFF, count: 1 },
-        'user_1',
-      ),
-    ).rejects.toThrow(
-      new BadRequestException(
-        'You already have an active or approved OFF request for lunch today.',
-      ),
-    );
-  });
-
-  it('should reject meal modification if meal is already COOKING', async () => {
-    mockPrismaService.dailyLog.upsert.mockResolvedValueOnce({
-      id: '2026-07-23',
-      monthId: 'month_1',
-      lunchStatus: MealStatus.COOKING,
-      dinnerStatus: MealStatus.OPEN,
+    it('should delegate approveRequest', async () => {
+      const res = await service.approveRequest('req_1', 'mgr_1');
+      expect(res.message).toBe('Request approved successfully');
+      expect(mockMealRequestsService.approveRequest).toHaveBeenCalledWith(
+        'req_1',
+        'mgr_1',
+      );
     });
 
-    await expect(
-      service.requestMealUpdate(
-        { type: MealType.LUNCH, category: RequestCategory.OFF, count: 1 },
-        'user_1',
-      ),
-    ).rejects.toThrow(
-      new BadRequestException('Cannot modify meal: lunch is already cooking!'),
-    );
-  });
-
-  it('should allow manager to reject a pending meal request', async () => {
-    const result = await service.rejectRequest('req_1', 'mgr_1');
-
-    expect(result).toHaveProperty('message', 'Request rejected successfully');
-    expect(mockPrismaService.mealRequest.update).toHaveBeenCalledWith({
-      where: { id: 'req_1' },
-      data: { status: RequestStatus.REJECTED },
+    it('should delegate rejectRequest', async () => {
+      const res = await service.rejectRequest('req_1', 'mgr_1');
+      expect(res.message).toBe('Request rejected successfully');
+      expect(mockMealRequestsService.rejectRequest).toHaveBeenCalledWith(
+        'req_1',
+        'mgr_1',
+      );
     });
-    expect(mockQueue.add).toHaveBeenCalledWith('send-user-notification', {
-      userId: 'user_1',
-      title: '❌ Meal Request Rejected',
-      body: 'Manager rejected your OFF request for LUNCH.',
+
+    it('should delegate getPendingRequests', async () => {
+      const res = await service.getPendingRequests('mgr_1');
+      expect(res).toEqual([]);
+      expect(mockMealRequestsService.getPendingRequests).toHaveBeenCalledWith(
+        'mgr_1',
+      );
     });
-  });
 
-  it('should allow manager to update today meal cooking status', async () => {
-    const result = await service.updateMealStatus(
-      { type: MealType.LUNCH, status: MealStatus.COOKING },
-      'mgr_1',
-    );
-
-    expect(result.message).toContain(
-      'LUNCH status successfully updated to COOKING',
-    );
-    expect(mockPrismaService.dailyLog.update).toHaveBeenCalledWith({
-      where: { id: '2026-07-23' },
-      data: { lunchStatus: MealStatus.COOKING },
-    });
-    expect(mockQueue.add).toHaveBeenCalledWith('send-mess-notification', {
-      messId: 'mess_1',
-      title: '🍲 Meal Status Update: LUNCH',
-      body: 'LUNCH is now marked as COOKING by Manager.',
-    });
-  });
-
-  describe('cancelMealRequest', () => {
-    it('should successfully cancel pending meal request before deadline', async () => {
-      mockPrismaService.mealRequest.findUniqueOrThrow.mockResolvedValueOnce({
-        id: 'req_1',
-        userId: 'user_1',
-        type: 'LUNCH',
-        status: RequestStatus.PENDING,
-      });
-
+    it('should delegate cancelMealRequest', async () => {
       const res = await service.cancelMealRequest('req_1', 'user_1');
       expect(res.message).toBe('Meal request cancelled successfully');
-      expect(mockPrismaService.mealRequest.delete).toHaveBeenCalledWith({
-        where: { id: 'req_1' },
-      });
-    });
-
-    it('should reject cancellation if request belongs to someone else', async () => {
-      mockPrismaService.mealRequest.findUniqueOrThrow.mockResolvedValueOnce({
-        id: 'req_1',
-        userId: 'other_user',
-        type: 'LUNCH',
-        status: RequestStatus.PENDING,
-      });
-
-      await expect(
-        service.cancelMealRequest('req_1', 'user_1'),
-      ).rejects.toThrow(
-        new BadRequestException('You can only cancel your own meal requests.'),
+      expect(mockMealRequestsService.cancelMealRequest).toHaveBeenCalledWith(
+        'req_1',
+        'user_1',
       );
     });
+  });
 
-    it('should reject cancellation if request is not PENDING', async () => {
-      mockPrismaService.mealRequest.findUniqueOrThrow.mockResolvedValueOnce({
-        id: 'req_1',
-        userId: 'user_1',
-        type: 'LUNCH',
-        status: RequestStatus.APPROVED,
-      });
-
-      await expect(
-        service.cancelMealRequest('req_1', 'user_1'),
-      ).rejects.toThrow(
-        new BadRequestException('Only pending requests can be cancelled.'),
+  describe('updateMealStatus', () => {
+    it('should allow manager to update today meal cooking status', async () => {
+      const result = await service.updateMealStatus(
+        { type: MealType.LUNCH, status: MealStatus.COOKING },
+        'mgr_1',
       );
+
+      expect(result.message).toContain(
+        'LUNCH status successfully updated to COOKING',
+      );
+      expect(mockPrismaService.dailyLog.update).toHaveBeenCalledWith({
+        where: { id: '2026-07-23' },
+        data: { lunchStatus: MealStatus.COOKING },
+      });
+      expect(mockQueue.add).toHaveBeenCalledWith('send-mess-notification', {
+        messId: 'mess_1',
+        title: '🍲 Meal Status Update: LUNCH',
+        body: 'LUNCH is now marked as COOKING by Manager.',
+      });
     });
 
-    it('should reject cancellation if deadline has passed', async () => {
-      mockContextValidator.validateUserAndMess.mockResolvedValueOnce({
-        user: { id: 'user_1', messId: 'mess_1' },
-        mess: {
-          id: 'mess_1',
-          currentMonthId: 'month_1',
-          lunchEndTime: '00:00',
+    it('should reset count to 0 and record manager name when status is CANCELLED', async () => {
+      mockContextValidator.validateManager.mockResolvedValueOnce({
+        manager: { id: 'mgr_1', name: 'Tareq', messId: 'mess_1' },
+        mess: { id: 'mess_1', currentMonthId: 'month_1' },
+      });
+
+      await service.updateMealStatus(
+        { type: MealType.LUNCH, status: MealStatus.CANCELLED },
+        'mgr_1',
+      );
+
+      expect(mockPrismaService.dailyLog.update).toHaveBeenCalledWith({
+        where: { id: '2026-07-23' },
+        data: {
+          lunchStatus: MealStatus.CANCELLED,
+          lunchCancelledBy: 'Tareq',
+          lunchCount: 0,
         },
       });
-      mockPrismaService.mealRequest.findUniqueOrThrow.mockResolvedValueOnce({
-        id: 'req_1',
-        userId: 'user_1',
-        type: 'LUNCH',
-        status: RequestStatus.PENDING,
+    });
+  });
+
+  describe('getDailyLiveCount', () => {
+    it('should return today daily live count and cached log', async () => {
+      mockPrismaService.dailyLog.findUnique.mockResolvedValueOnce({
+        id: 'month_1_2026-07-23',
+        lunchCount: 4,
+        dinnerCount: 5,
+        requests: [],
       });
 
-      await expect(
-        service.cancelMealRequest('req_1', 'user_1'),
-      ).rejects.toThrow(BadRequestException);
+      const res = await service.getDailyLiveCount('user_1');
+      expect(res).toHaveProperty('lunchCount', 4);
+      expect(mockAppCache.remember).toHaveBeenCalled();
     });
   });
 
@@ -299,121 +217,9 @@ describe('MealsService (Unit Tests)', () => {
 
     it('should reject invalid date format', async () => {
       await expect(
-        service.getDailyLogByDate('20-07-2026', 'user_1'),
+        service.getDailyLogByDate('invalid-date', 'user_1'),
       ).rejects.toThrow(
         new BadRequestException('Invalid date format. Expected YYYY-MM-DD'),
-      );
-    });
-  });
-
-  describe('getPendingRequests', () => {
-    it('should return pending requests for manager active month', async () => {
-      mockPrismaService.mealRequest.findMany = jest.fn().mockResolvedValueOnce([
-        {
-          id: 'req_1',
-          status: RequestStatus.PENDING,
-          type: 'LUNCH',
-          user: { name: 'Rafi' },
-        },
-      ]);
-
-      const res = await service.getPendingRequests('mgr_1');
-      expect(res).toHaveLength(1);
-      expect(mockPrismaService.mealRequest.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: {
-            log: { monthId: 'month_1' },
-            status: RequestStatus.PENDING,
-          },
-        }),
-      );
-    });
-  });
-
-  it('should reset lunchCount to 0 when meal is CANCELLED', async () => {
-    mockPrismaService.dailyLog.update.mockResolvedValueOnce({
-      id: '2026-07-23',
-      lunchStatus: MealStatus.CANCELLED,
-      lunchCount: 0,
-    });
-
-    await service.updateMealStatus(
-      { type: MealType.LUNCH, status: MealStatus.CANCELLED },
-      'mgr_1',
-    );
-
-    expect(mockPrismaService.dailyLog.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          lunchStatus: MealStatus.CANCELLED,
-          lunchCount: 0,
-        }),
-      }),
-    );
-  });
-
-  describe('approveRequest (Edge Cases)', () => {
-    it('should reject request approval if meal is CANCELLED', async () => {
-      mockPrismaService.mealRequest.findUniqueOrThrow.mockResolvedValueOnce({
-        id: 'req_1',
-        status: RequestStatus.PENDING,
-        type: 'LUNCH',
-        category: 'OFF',
-        count: 1,
-        userId: 'user_1',
-        logId: '2026-07-23',
-        log: {
-          lunchStatus: MealStatus.CANCELLED,
-          dinnerStatus: MealStatus.OPEN,
-        },
-        user: { messId: 'mess_1' },
-      });
-
-      await expect(service.approveRequest('req_1', 'mgr_1')).rejects.toThrow(
-        new BadRequestException(
-          'Cannot approve request: lunch has been cancelled for this day.',
-        ),
-      );
-    });
-
-    it('should floor count at 0 when decrement exceeds current count', async () => {
-      mockPrismaService.mealRequest.findUniqueOrThrow.mockResolvedValueOnce({
-        id: 'req_1',
-        status: RequestStatus.PENDING,
-        type: 'LUNCH',
-        category: 'OFF',
-        count: 5,
-        userId: 'user_1',
-        logId: '2026-07-23',
-        log: { lunchStatus: MealStatus.OPEN, lunchCount: 2 },
-        user: { messId: 'mess_1' },
-      });
-
-      await service.approveRequest('req_1', 'mgr_1');
-
-      expect(mockPrismaService.dailyLog.update).toHaveBeenCalledWith({
-        where: { id: '2026-07-23' },
-        data: { lunchCount: 0 }, // Math.max(0, 2 - 5) = 0
-      });
-    });
-  });
-
-  describe('cancelMealRequest (Edge Cases)', () => {
-    it('should reject request cancellation if meal is already COOKING', async () => {
-      mockPrismaService.mealRequest.findUniqueOrThrow.mockResolvedValueOnce({
-        id: 'req_1',
-        userId: 'user_1',
-        type: 'LUNCH',
-        status: RequestStatus.PENDING,
-        log: { lunchStatus: MealStatus.COOKING },
-      });
-
-      await expect(
-        service.cancelMealRequest('req_1', 'user_1'),
-      ).rejects.toThrow(
-        new BadRequestException(
-          'Cannot cancel request: lunch is already cooking!',
-        ),
       );
     });
   });

@@ -22,13 +22,17 @@ import { Role } from '@prisma/client';
 import { UpdateMealDto } from './dto/update-meal.dto';
 import { UpdateMealStatusDto } from './dto/update-meal-status.dto';
 import { MealsService } from './meals.service';
+import { MealRequestsService } from './meal-requests.service';
 
 @ApiTags('Daily Meals')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard)
 @Controller('meals')
 export class MealsController {
-  constructor(private readonly mealsService: MealsService) {}
+  constructor(
+    private readonly mealsService: MealsService,
+    private readonly mealRequestsService: MealRequestsService,
+  ) {}
 
   @Post('request')
   @ApiOperation({
@@ -43,7 +47,7 @@ export class MealsController {
     @Body() dto: UpdateMealDto,
     @CurrentUser() user: { id: string },
   ) {
-    return this.mealsService.requestMealUpdate(dto, user.id);
+    return this.mealRequestsService.requestMealUpdate(dto, user.id);
   }
 
   @Patch('approve/:id')
@@ -66,7 +70,7 @@ export class MealsController {
     @Param('id') requestId: string,
     @CurrentUser() user: { id: string },
   ) {
-    return this.mealsService.approveRequest(requestId, user.id);
+    return this.mealRequestsService.approveRequest(requestId, user.id);
   }
 
   @Patch('reject/:id')
@@ -89,7 +93,7 @@ export class MealsController {
     @Param('id') requestId: string,
     @CurrentUser() user: { id: string },
   ) {
-    return this.mealsService.rejectRequest(requestId, user.id);
+    return this.mealRequestsService.rejectRequest(requestId, user.id);
   }
 
   @Get('pending-requests')
@@ -104,7 +108,7 @@ export class MealsController {
     description: 'Pending requests returned.',
   })
   getPendingRequests(@CurrentUser() user: { id: string }) {
-    return this.mealsService.getPendingRequests(user.id);
+    return this.mealRequestsService.getPendingRequests(user.id);
   }
 
   @Patch('status')
@@ -148,23 +152,26 @@ export class MealsController {
     @Param('id') requestId: string,
     @CurrentUser() user: { id: string },
   ) {
-    return this.mealsService.cancelMealRequest(requestId, user.id);
+    return this.mealRequestsService.cancelMealRequest(requestId, user.id);
   }
 
-  @Get('log/:date')
+  @Get('date/:date')
   @ApiOperation({
     summary:
-      'Get historical or specific daily meal counts and requests by date (YYYY-MM-DD)',
+      'View daily meal log and all member requests for a specific date (YYYY-MM-DD)',
   })
-  @ApiResponse({ status: 200, description: 'Daily log returned.' })
+  @ApiResponse({
+    status: 200,
+    description: 'Daily log and requests for the specific date returned.',
+  })
   @ApiResponse({
     status: 400,
-    description: 'Invalid date format. Expected YYYY-MM-DD.',
+    description: 'Invalid date format or no active month session.',
   })
   getDailyLogByDate(
-    @Param('date') dateStr: string,
+    @Param('date') date: string,
     @CurrentUser() user: { id: string },
   ) {
-    return this.mealsService.getDailyLogByDate(dateStr, user.id);
+    return this.mealsService.getDailyLogByDate(date, user.id);
   }
 }
