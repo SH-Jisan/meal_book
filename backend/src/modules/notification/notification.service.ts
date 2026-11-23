@@ -106,12 +106,16 @@ export class NotificationService implements OnModuleInit {
     }
   }
 
-  // ৪. মেম্বারের ইন-অ্যাপ নোটিফিকেশন লিস্ট পাওয়া (Bell Icon Dropdown)
-  async getUserNotifications(userId: string) {
+  // ৪. মেম্বারের ইন-অ্যাপ নোটিফিকেশন লিস্ট পাওয়া (Bell Icon Dropdown with Pagination)
+  async getUserNotifications(userId: string, limit = 20, offset = 0) {
+    const safeLimit = Math.min(Math.max(1, limit), 100);
+    const safeOffset = Math.max(0, offset);
+
     return this.prisma.notification.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
-      take: 20,
+      take: safeLimit,
+      skip: safeOffset,
     });
   }
 
@@ -121,5 +125,25 @@ export class NotificationService implements OnModuleInit {
       where: { id: notificationId, userId },
       data: { isRead: true },
     });
+  }
+
+  // ৬. ইউজারের সব ইন-অ্যাপ নোটিফিকেশন একসাথে Read হিসেবে মার্ক করা
+  async markAllAsRead(userId: string) {
+    const result = await this.prisma.notification.updateMany({
+      where: { userId, isRead: false },
+      data: { isRead: true },
+    });
+    return {
+      message: 'All notifications marked as read',
+      count: result.count,
+    };
+  }
+
+  // ৭. অপঠিত নোটিফিকেশনের সংখ্যা গণনা করা (Lightweight Badge Count)
+  async getUnreadCount(userId: string) {
+    const unreadCount = await this.prisma.notification.count({
+      where: { userId, isRead: false },
+    });
+    return { unreadCount };
   }
 }

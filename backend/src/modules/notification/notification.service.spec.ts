@@ -21,6 +21,7 @@ describe('NotificationService (Unit Tests)', () => {
       }),
       findMany: jest.fn().mockResolvedValue([]),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      count: jest.fn().mockResolvedValue(3),
     },
   };
 
@@ -51,5 +52,43 @@ describe('NotificationService (Unit Tests)', () => {
     );
 
     expect(notif).toHaveProperty('id', 'notif_1');
+  });
+
+  it('should mark all notifications as read', async () => {
+    mockPrismaService.notification.updateMany.mockResolvedValueOnce({
+      count: 5,
+    });
+    const result = await service.markAllAsRead('user_123');
+
+    expect(result).toHaveProperty('count', 5);
+    expect(mockPrismaService.notification.updateMany).toHaveBeenCalledWith({
+      where: { userId: 'user_123', isRead: false },
+      data: { isRead: true },
+    });
+  });
+
+  it('should return unread notification count', async () => {
+    mockPrismaService.notification.count = jest.fn().mockResolvedValueOnce(3);
+    const result = await service.getUnreadCount('user_123');
+
+    expect(result).toEqual({ unreadCount: 3 });
+    expect(mockPrismaService.notification.count).toHaveBeenCalledWith({
+      where: { userId: 'user_123', isRead: false },
+    });
+  });
+
+  it('should paginate notifications with limit and offset', async () => {
+    mockPrismaService.notification.findMany.mockResolvedValueOnce([
+      { id: 'notif_1', title: 'Test 1' },
+    ]);
+
+    const result = await service.getUserNotifications('user_123', 10, 5);
+    expect(result).toHaveLength(1);
+    expect(mockPrismaService.notification.findMany).toHaveBeenCalledWith({
+      where: { userId: 'user_123' },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+      skip: 5,
+    });
   });
 });

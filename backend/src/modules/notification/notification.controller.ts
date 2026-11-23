@@ -5,6 +5,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -39,11 +40,39 @@ export class NotificationController {
 
   @Get()
   @ApiOperation({
-    summary: 'Get in-app notifications history for logged in user',
+    summary:
+      'Get in-app notifications history for logged in user (with optional pagination)',
   })
   @ApiResponse({ status: 200, description: 'Notifications returned.' })
-  getUserNotifications(@CurrentUser() user: { id: string }) {
-    return this.notificationService.getUserNotifications(user.id);
+  getUserNotifications(
+    @CurrentUser() user: { id: string },
+    @Query('limit') limit?: number,
+    @Query('offset') offset?: number,
+  ) {
+    return this.notificationService.getUserNotifications(
+      user.id,
+      limit ? Number(limit) : 20,
+      offset ? Number(offset) : 0,
+    );
+  }
+
+  @Get('unread-count')
+  @ApiOperation({
+    summary: 'Get unread notification count for notification bell badge',
+  })
+  @ApiResponse({ status: 200, description: 'Unread count returned.' })
+  getUnreadCount(@CurrentUser() user: { id: string }) {
+    return this.notificationService.getUnreadCount(user.id);
+  }
+
+  @Patch('read-all')
+  @ApiOperation({ summary: 'Mark all in-app notifications as read' })
+  @ApiResponse({
+    status: 200,
+    description: 'All notifications marked as read.',
+  })
+  markAllAsRead(@CurrentUser() user: { id: string }) {
+    return this.notificationService.markAllAsRead(user.id);
   }
 
   @Patch('read/:id')
