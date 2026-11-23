@@ -105,15 +105,28 @@ export class BillingService {
       }, 0);
       const mealRate = totalMeals > 0 ? totalBazaarCost / totalMeals : 0;
 
+      const formatDhakaDateStr = (
+        date: Date | string | null | undefined,
+      ): string | null => {
+        if (!date) return null;
+        try {
+          return new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Dhaka',
+          }).format(new Date(date));
+        } catch {
+          return null;
+        }
+      };
+
       const logDates = dailyLogs.map((log) => {
         const parts = (log.id || '').split('_');
         const dateCandidate = parts[parts.length - 1];
-        let dateObj = log.createdAt ? new Date(log.createdAt) : new Date();
-        if (dateCandidate && /^\d{4}-\d{2}-\d{2}$/.test(dateCandidate)) {
-          dateObj = new Date(dateCandidate + 'T00:00:00+06:00');
+        let dateStr = dateCandidate;
+        if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+          dateStr = formatDhakaDateStr(log.createdAt) || '2026-01-01';
         }
         return {
-          date: dateObj,
+          dateStr,
           lunchStatus: log.lunchStatus,
           dinnerStatus: log.dinnerStatus,
         };
@@ -176,19 +189,16 @@ export class BillingService {
         const hasLeft = member.messId !== user.messId! || !!member.leftAt;
         const adjustment = memberMealAdjustments.get(member.id) || 0;
 
+        const memberJoinedStr = formatDhakaDateStr(member.joinedAt);
+        const memberLeftStr = formatDhakaDateStr(member.leftAt);
+
         // ⚡ FAIR RESIDENCY PRORATION: মেম্বার যে দিনগুলোতে মেসে অবস্থান করেছেন শুধুমাত্র সেই দিনগুলোর কার্যকর মিল হিসাব করা (বাতিল মিল বাদ দিয়ে)
         let memberDefaultMeals = 0;
         if (logDates.length > 0) {
           for (const item of logDates) {
-            const startOfLogDay = new Date(item.date);
-            startOfLogDay.setHours(0, 0, 0, 0);
-            const endOfLogDay = new Date(item.date);
-            endOfLogDay.setHours(23, 59, 59, 999);
-
             const joinedOk =
-              !member.joinedAt || new Date(member.joinedAt) <= endOfLogDay;
-            const leftOk =
-              !member.leftAt || new Date(member.leftAt) >= startOfLogDay;
+              !memberJoinedStr || item.dateStr >= memberJoinedStr;
+            const leftOk = !memberLeftStr || item.dateStr <= memberLeftStr;
 
             if (joinedOk && leftOk) {
               let activeDayMeals = 0;
