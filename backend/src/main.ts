@@ -19,8 +19,14 @@ async function bootstrap() {
   app.use(cookieParser());
   app.use(compression());
 
-  // ১. CORS সচল করা
-  app.enableCors();
+  // ১. CORS সচল করা (Web SPA & Cookie Credentials সহ)
+  const allowedOrigins = configService.get<string>('CORS_ORIGINS');
+  app.enableCors({
+    origin: allowedOrigins
+      ? allowedOrigins.split(',').map((o) => o.trim())
+      : true,
+    credentials: true,
+  });
 
   // ২. গ্লোবাল ডাটা ভ্যালিডেশন পাইপ যুক্ত করা
   app.useGlobalPipes(
